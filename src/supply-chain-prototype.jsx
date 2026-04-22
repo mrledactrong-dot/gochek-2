@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import {
   Package, ShoppingCart, Truck, Warehouse, Coins, BarChart3,
   Plus, ChevronRight, AlertTriangle, CheckCircle2, Clock,
@@ -39,6 +39,19 @@ const SEED_WAREHOUSES = [
   { id: "W-TH", code: "TH-BKK", country: "Thái Lan", flag: "🇹🇭", type: "destination", currency: "THB", vat: 0.07, freightRate: 3.0 },
   { id: "W-MY", code: "MY-KUL", country: "Malaysia", flag: "🇲🇾", type: "destination", currency: "MYR", vat: 0.06, freightRate: 3.5 },
   { id: "W-PH", code: "PH-MNL", country: "Philippines", flag: "🇵🇭", type: "destination", currency: "PHP", vat: 0.12, freightRate: 4.0 },
+];
+
+// Đơn vị vận chuyển (forwarder / freight carrier)
+const SEED_CARRIERS = [
+  { id: "C001", name: "SF Express", name_cn: "顺丰速运", code: "SFC",
+    contact_name: "Mr. Zhang", email: "contact@sf-express.com", phone: "+86 400 811 1111",
+    payment_terms: "Net 30", notes: "Ổn định, chuyên ship CN → ASEAN, có tracking realtime", status: "active" },
+  { id: "C002", name: "Kerry Logistics", name_cn: "嘉里物流", code: "KRY",
+    contact_name: "Ms. Lin", email: "vn@kerrylogistics.com", phone: "+84 28 3822 9999",
+    payment_terms: "Net 45", notes: "Giá tốt cho lô lớn, nhiều tuyến", status: "active" },
+  { id: "C003", name: "DHL Global Forwarding", name_cn: "DHL 全球货运", code: "DHL",
+    contact_name: "Mr. Nguyen", email: "dhl.vn@dhl.com", phone: "+84 28 3521 1111",
+    payment_terms: "Net 30", notes: "Đắt nhưng nhanh, dùng khi cần express", status: "active" },
 ];
 
 const SEED_POS = [
@@ -117,6 +130,15 @@ const SEED_DELIVERIES = [
     ] },
 ];
 
+// Shipments = logistics records theo tracking (gộp nhiều delivery cùng tracking)
+const SEED_SHIPMENTS = [
+  { tracking: "SFC-CONSOL-20260225", carrier_id: "C001", docs_completed: true, shipping_fee_cny: 3200, shipping_fee_paid: true, paid_date: "2026-03-15", notes: "" },
+  { tracking: "SFC-TH-20260228", carrier_id: "C001", docs_completed: true, shipping_fee_cny: 1800, shipping_fee_paid: true, paid_date: "2026-03-20", notes: "" },
+  { tracking: "SFC-MY-20260302", carrier_id: "C001", docs_completed: true, shipping_fee_cny: 1500, shipping_fee_paid: false, paid_date: null, notes: "Chờ cuối tháng thanh toán chung" },
+  { tracking: "SFC-PH-20260305", carrier_id: "C002", docs_completed: false, shipping_fee_cny: 1300, shipping_fee_paid: false, paid_date: null, notes: "Thiếu B/L" },
+  { tracking: "SFC-CONSOL-20260410", carrier_id: "C001", docs_completed: false, shipping_fee_cny: 2800, shipping_fee_paid: false, paid_date: null, notes: "Lô ghép TH + MY, đang chờ hàng về" },
+];
+
 function buildLots(deliveries) {
   const lots = [];
   deliveries.filter(d => d.status === "arrived").forEach(del => {
@@ -177,6 +199,7 @@ const formatVND = (n) => `₫${Math.round(n).toLocaleString()}`;
 const getSKU = (id) => SEED_SKUS.find(s => s.id === id);
 const getSupplier = (id) => SEED_SUPPLIERS.find(s => s.id === id);
 const getWarehouse = (id) => SEED_WAREHOUSES.find(w => w.id === id);
+const getCarrier = (id, carriers) => (carriers || SEED_CARRIERS).find(c => c.id === id);
 const getLot = (id, lots) => lots.find(l => l.id === id);
 const getPOByLineId = (polId, pos) => pos.find(po => po.lines.some(l => l.id === polId));
 
@@ -283,8 +306,18 @@ function MainApp({ currentUser, users, setUsers, onLogout }) {
   const [payments, setPayments] = useState(SEED_PAYMENTS);
   const [skus, setSkus] = useState(SEED_SKUS);
   const [suppliers, setSuppliers] = useState(SEED_SUPPLIERS);
+  const [carriers, setCarriers] = useState(SEED_CARRIERS);
+  const [shipments, setShipments] = useState(SEED_SHIPMENTS);
   const [auditLog, setAuditLog] = useState([]);
   const [modal, setModal] = useState(null);
+
+  // Helper lấy shipment info theo tracking. Nếu chưa có → trả về default
+  const getShipment = (tracking) => {
+    if (!tracking) return null;
+    return shipments.find(s => s.tracking === tracking) || {
+      tracking, docs_completed: false, shipping_fee_cny: 0, shipping_fee_paid: false, paid_date: null, notes: ""
+    };
+  };
 
   // Helper ghi log — dùng từ mọi handler
   const logChange = (entry) => {
@@ -349,11 +382,14 @@ function MainApp({ currentUser, users, setUsers, onLogout }) {
   const inTransitCount = deliveries.filter(d => d.status === "in_transit").length;
 
   const handleCreateDelivery = (newDelivery) => {
+    // Tách carrier_id ra khỏi delivery object (nó không thuộc delivery mà thuộc shipment)
+    const { carrier_id, ...deliveryData } = newDelivery;
+
     // Cập nhật po.lines[].delivered
     const updatedPos = pos.map(po => ({
       ...po,
       lines: po.lines.map(line => {
-        const added = newDelivery.lines
+        const added = deliveryData.lines
           .filter(dl => dl.po_line_id === line.id)
           .reduce((s, dl) => s + dl.qty, 0);
         return added > 0 ? { ...line, delivered: line.delivered + added } : line;
@@ -370,12 +406,33 @@ function MainApp({ currentUser, users, setUsers, onLogout }) {
       return { ...po, status: newStatus };
     });
     setPos(finalPos);
-    setDeliveries([...deliveries, newDelivery]);
-    const totalQty = newDelivery.lines.reduce((s, l) => s + l.qty, 0);
+    setDeliveries([...deliveries, deliveryData]);
+
+    // Nếu có tracking → ensure shipment exists + gán carrier_id nếu có chọn
+    if (deliveryData.tracking) {
+      const existing = shipments.find(s => s.tracking === deliveryData.tracking);
+      if (!existing) {
+        // Tạo shipment mới
+        setShipments(prev => [...prev, {
+          tracking: deliveryData.tracking,
+          carrier_id: carrier_id || null,
+          docs_completed: false, shipping_fee_cny: 0, shipping_fee_paid: false,
+          paid_date: null, notes: "",
+        }]);
+      } else if (carrier_id && !existing.carrier_id) {
+        // Shipment đã có (do delivery khác cùng tracking) mà chưa có carrier → điền vào
+        setShipments(prev => prev.map(s =>
+          s.tracking === deliveryData.tracking ? { ...s, carrier_id } : s
+        ));
+      }
+    }
+
+    const totalQty = deliveryData.lines.reduce((s, l) => s + l.qty, 0);
+    const carrierLabel = carrier_id ? ` · ${getCarrier(carrier_id, carriers)?.name || carrier_id}` : "";
     logChange({
-      action: "create", entity: "delivery", entity_id: newDelivery.id,
-      summary: `Tạo delivery ${newDelivery.id} đến ${getWarehouse(newDelivery.destination_id)?.country || ""} · ${totalQty} cái · Tracking: ${newDelivery.tracking || "—"}`,
-      before: null, after: newDelivery,
+      action: "create", entity: "delivery", entity_id: deliveryData.id,
+      summary: `Tạo delivery ${deliveryData.id} đến ${getWarehouse(deliveryData.destination_id)?.country || ""} · ${totalQty} cái · Tracking: ${deliveryData.tracking || "—"}${carrierLabel}`,
+      before: null, after: deliveryData,
     });
     setModal(null);
   };
@@ -416,6 +473,128 @@ function MainApp({ currentUser, users, setUsers, onLogout }) {
         changes: [{ field: "tracking", old: before.tracking || null, new: newTracking }],
       });
     }
+  };
+
+  // ====== Logistics handlers (theo tracking, không phải delivery) ======
+  const upsertShipment = (tracking, patch) => {
+    setShipments(prev => {
+      const idx = prev.findIndex(s => s.tracking === tracking);
+      if (idx === -1) {
+        return [...prev, { tracking, docs_completed: false, shipping_fee_cny: 0, shipping_fee_paid: false, paid_date: null, notes: "", ...patch }];
+      }
+      return prev.map((s, i) => i === idx ? { ...s, ...patch } : s);
+    });
+  };
+
+  const handleToggleDocs = (tracking) => {
+    if (!tracking) return;
+    const before = getShipment(tracking);
+    const newValue = !before.docs_completed;
+    upsertShipment(tracking, { docs_completed: newValue });
+    // Đếm số delivery dùng chung tracking này để log cho rõ
+    const affectedCount = deliveries.filter(d => d.tracking === tracking).length;
+    logChange({
+      action: "update", entity: "shipment", entity_id: tracking,
+      summary: `Tracking ${tracking}: Chứng từ ${newValue ? "✓ ĐÃ hoàn thiện" : "✗ CHƯA hoàn thiện"} (${affectedCount} delivery)`,
+      before, after: { ...before, docs_completed: newValue },
+      changes: [{ field: "docs_completed", old: before.docs_completed, new: newValue }],
+    });
+  };
+
+  const handleToggleShippingPaid = (tracking) => {
+    if (!tracking) return;
+    const before = getShipment(tracking);
+    const newValue = !before.shipping_fee_paid;
+    const paidDate = newValue ? new Date().toISOString().split("T")[0] : null;
+    upsertShipment(tracking, { shipping_fee_paid: newValue, paid_date: paidDate });
+    const affectedCount = deliveries.filter(d => d.tracking === tracking).length;
+    logChange({
+      action: "update", entity: "shipment", entity_id: tracking,
+      summary: `Tracking ${tracking}: Phí VC ${newValue ? "✓ ĐÃ trả" : "✗ CHƯA trả"} (${formatCNY(before.shipping_fee_cny)}, ${affectedCount} delivery)`,
+      before, after: { ...before, shipping_fee_paid: newValue, paid_date: paidDate },
+      changes: [{ field: "shipping_fee_paid", old: before.shipping_fee_paid, new: newValue }],
+    });
+  };
+
+  const handleUpdateShippingFee = (tracking, newFee) => {
+    if (!tracking) return;
+    const before = getShipment(tracking);
+    const fee = Number(newFee) || 0;
+    if (before.shipping_fee_cny === fee) return;
+    upsertShipment(tracking, { shipping_fee_cny: fee });
+    const affectedCount = deliveries.filter(d => d.tracking === tracking).length;
+    logChange({
+      action: "update", entity: "shipment", entity_id: tracking,
+      summary: `Tracking ${tracking}: Phí VC ${formatCNY(before.shipping_fee_cny)} → ${formatCNY(fee)} (${affectedCount} delivery)`,
+      before, after: { ...before, shipping_fee_cny: fee },
+      changes: [{ field: "shipping_fee_cny", old: before.shipping_fee_cny, new: fee }],
+    });
+  };
+
+  const handleUpdateShipmentNotes = (tracking, newNotes) => {
+    if (!tracking) return;
+    const before = getShipment(tracking);
+    if ((before.notes || "") === newNotes) return;
+    upsertShipment(tracking, { notes: newNotes });
+    logChange({
+      action: "update", entity: "shipment", entity_id: tracking,
+      summary: `Tracking ${tracking}: Cập nhật ghi chú logistics`,
+      before, after: { ...before, notes: newNotes },
+      changes: [{ field: "notes", old: before.notes || "", new: newNotes }],
+    });
+  };
+
+  // Gán đơn vị vận chuyển cho tracking
+  const handleUpdateShipmentCarrier = (tracking, carrierId) => {
+    if (!tracking) return;
+    const before = getShipment(tracking);
+    if (before.carrier_id === carrierId) return;
+    const carrier = getCarrier(carrierId, carriers);
+    upsertShipment(tracking, { carrier_id: carrierId });
+    logChange({
+      action: "update", entity: "shipment", entity_id: tracking,
+      summary: `Tracking ${tracking}: Đơn vị vận chuyển → ${carrier?.name || carrierId || "—"}`,
+      before, after: { ...before, carrier_id: carrierId },
+      changes: [{ field: "carrier_id", old: before.carrier_id || null, new: carrierId }],
+    });
+  };
+
+  // CRUD carrier
+  const handleCreateCarrier = (data) => {
+    const newId = `C${String(carriers.length + 1).padStart(3, "0")}`;
+    const newCarrier = { id: newId, status: "active", ...data };
+    setCarriers(prev => [...prev, newCarrier]);
+    logChange({
+      action: "create", entity: "carrier", entity_id: newId,
+      summary: `Thêm đơn vị vận chuyển ${newCarrier.name}`,
+      after: newCarrier,
+    });
+  };
+
+  const handleUpdateCarrier = (id, data) => {
+    const before = carriers.find(c => c.id === id);
+    if (!before) return;
+    const after = { ...before, ...data };
+    setCarriers(prev => prev.map(c => c.id === id ? after : c));
+    logChange({
+      action: "update", entity: "carrier", entity_id: id,
+      summary: `Cập nhật đơn vị vận chuyển ${after.name}`,
+      before, after,
+      changes: computeChanges(before, after, ["name", "name_cn", "code", "contact_name", "email", "phone", "payment_terms", "notes", "status"]),
+    });
+  };
+
+  const handleToggleCarrierStatus = (id) => {
+    const before = carriers.find(c => c.id === id);
+    if (!before) return;
+    const newStatus = before.status === "active" ? "inactive" : "active";
+    setCarriers(prev => prev.map(c => c.id === id ? { ...c, status: newStatus } : c));
+    logChange({
+      action: "update", entity: "carrier", entity_id: id,
+      summary: `${newStatus === "active" ? "Kích hoạt lại" : "Vô hiệu hóa"} đơn vị vận chuyển ${before.name}`,
+      before, after: { ...before, status: newStatus },
+      changes: [{ field: "status", old: before.status, new: newStatus }],
+    });
   };
 
   const handleCreatePayment = (newPayment) => {
@@ -727,11 +906,12 @@ function MainApp({ currentUser, users, setUsers, onLogout }) {
   const views = {
     dashboard: <Dashboard pos={pos} deliveries={deliveries} lots={lots} inventory={inventory} supplierDebts={supplierDebts} totalCommitted={totalCommitted} totalActual={totalActual} setModal={setModal} setActiveView={setActiveView} currentUser={currentUser} />,
     suppliers: <SuppliersView pos={pos} deliveries={deliveries} supplierDebts={supplierDebts} suppliers={suppliers} setModal={setModal} currentUser={currentUser} onSubmitPO={handleSubmitPO} onRecallPO={handleRecallPO} onApprovePO={handleApprovePO} onRejectPO={handleRejectPO} onMarkSentPO={handleMarkSentPO} />,
-    deliveries: <DeliveriesView pos={pos} deliveries={deliveries} lots={lots} setModal={setModal} onMarkArrived={handleMarkArrived} onUpdateTracking={handleUpdateTracking} currentUser={currentUser} />,
+    deliveries: <DeliveriesView pos={pos} deliveries={deliveries} lots={lots} shipments={shipments} carriers={carriers} getShipment={getShipment} setModal={setModal} onMarkArrived={handleMarkArrived} onUpdateTracking={handleUpdateTracking} onToggleDocs={handleToggleDocs} onToggleShippingPaid={handleToggleShippingPaid} onUpdateShippingFee={handleUpdateShippingFee} onUpdateShipmentNotes={handleUpdateShipmentNotes} onUpdateShipmentCarrier={handleUpdateShipmentCarrier} currentUser={currentUser} />,
     inventory: <InventoryView inventory={inventory} lots={lots} pos={pos} />,
     products: <ProductsView skus={skus} pos={pos} inventory={inventory} setModal={setModal} onToggleStatus={handleToggleSKUStatus} currentUser={currentUser} />,
     suppliers_mgmt: <SuppliersManagementView suppliers={suppliers} pos={pos} supplierDebts={supplierDebts} setModal={setModal} onToggleStatus={handleToggleSupplierStatus} currentUser={currentUser} />,
     payments: <PaymentsView pos={pos} payments={payments} supplierDebts={supplierDebts} suppliers={suppliers} totalCommitted={totalCommitted} totalActual={totalActual} setModal={setModal} currentUser={currentUser} />,
+    carriers: <CarriersView carriers={carriers} shipments={shipments} deliveries={deliveries} pos={pos} setModal={setModal} onToggleStatus={handleToggleCarrierStatus} onToggleShippingPaid={handleToggleShippingPaid} onToggleDocs={handleToggleDocs} currentUser={currentUser} />,
     reports: <ReportsView suppliers={suppliers} pos={pos} payments={payments} deliveries={deliveries} currentUser={currentUser} />,
     audit: <AuditLogView auditLog={auditLog} currentUser={currentUser} />,
     users: <UsersView users={users} currentUser={currentUser} setModal={setModal} onToggleStatus={handleToggleUserStatus} />,
@@ -784,6 +964,7 @@ function MainApp({ currentUser, users, setUsers, onLogout }) {
             <NavItem icon={Warehouse} label="Tồn kho" badge={null} active={activeView === "inventory"} collapsed={sidebarCollapsed} onClick={() => setActiveView("inventory")} />
             <NavItem icon={Package} label="Sản phẩm" badge={null} active={activeView === "products"} collapsed={sidebarCollapsed} onClick={() => setActiveView("products")} />
             <NavItem icon={FileText} label="Nhà cung cấp" badge={null} active={activeView === "suppliers_mgmt"} collapsed={sidebarCollapsed} onClick={() => setActiveView("suppliers_mgmt")} />
+            <NavItem icon={Truck} label="Vận chuyển" badge={null} active={activeView === "carriers"} collapsed={sidebarCollapsed} onClick={() => setActiveView("carriers")} />
             <NavItem icon={FileText} label="Báo cáo" badge={null} active={activeView === "reports"} collapsed={sidebarCollapsed} onClick={() => setActiveView("reports")} />
             <NavItem icon={History} label="Nhật ký" badge={auditLog.length > 0 ? auditLog.length : null} active={activeView === "audit"} collapsed={sidebarCollapsed} onClick={() => setActiveView("audit")} />
             {can(currentUser, "manage_users") && (
@@ -842,7 +1023,7 @@ function MainApp({ currentUser, users, setUsers, onLogout }) {
         </main>
       </div>
 
-      {modal && <Modal {...modal} pos={pos} deliveries={deliveries} payments={payments} supplierDebts={supplierDebts} skus={skus} suppliers={suppliers} users={users} currentUser={currentUser} onClose={() => setModal(null)} onCreateDelivery={handleCreateDelivery} onCreatePayment={handleCreatePayment} onCreatePO={handleCreatePO} onCreateSKU={handleCreateSKU} onUpdateSKU={handleUpdateSKU} onCreateSupplier={handleCreateSupplier} onUpdateSupplier={handleUpdateSupplier} onCreateUser={handleCreateUser} onUpdateUser={handleUpdateUser} />}
+      {modal && <Modal {...modal} pos={pos} deliveries={deliveries} payments={payments} supplierDebts={supplierDebts} skus={skus} suppliers={suppliers} users={users} carriers={carriers} currentUser={currentUser} onClose={() => setModal(null)} onCreateDelivery={handleCreateDelivery} onCreatePayment={handleCreatePayment} onCreatePO={handleCreatePO} onCreateSKU={handleCreateSKU} onUpdateSKU={handleUpdateSKU} onCreateSupplier={handleCreateSupplier} onUpdateSupplier={handleUpdateSupplier} onCreateUser={handleCreateUser} onUpdateUser={handleUpdateUser} onCreateCarrier={handleCreateCarrier} onUpdateCarrier={handleUpdateCarrier} />}
     </div>
   );
 }
@@ -1580,10 +1761,10 @@ function PODetailPanel({ po, deliveries, currentUser, onClose, onSubmitPO, onRec
             <button onClick={handleDownloadExcel}
               className="w-full py-3 bg-[#1a2332] text-[#f5f2eb] hover:bg-[#2a3547] text-sm font-medium flex items-center justify-center gap-2">
               <Download size={16} />
-              Tải Excel gửi NCC · Purchase Order (EN + 中文)
+              Tải Excel gửi NCC · Đơn đặt hàng (Việt + 中文)
             </button>
             <div className="text-[10px] text-[#8a7c4f] mt-2 text-center italic">
-              File Excel song ngữ Anh + Trung, sẵn sàng gửi email cho nhà máy Trung Quốc
+              File Excel song ngữ Việt + Trung, sẵn sàng gửi email cho nhà máy Trung Quốc
             </div>
           </div>
         ) : !isProxy && (
@@ -1815,30 +1996,30 @@ function RejectReasonModal({ poId, onCancel, onConfirm }) {
   );
 }
 
-// Helper: xuất Excel PO song ngữ EN+中文 dùng SheetJS
+// Helper: xuất Excel PO song ngữ Việt + 中文 dùng SheetJS
 function downloadPOExcel(po, supplier) {
   // Import động để không block bundle
   import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm").then(XLSX => {
     const rows = [];
 
-    // Header PO info (bilingual)
-    rows.push(["Purchase Order / 采购订单"]);
+    // Header PO info (Việt + Trung)
+    rows.push(["ĐƠN ĐẶT HÀNG / 采购订单"]);
     rows.push([]);
-    rows.push(["PO Number / 订单号:", po.id]);
-    rows.push(["Date / 日期:", po.po_date]);
-    rows.push(["Supplier / 供应商:", supplier.name_cn ? `${supplier.name} / ${supplier.name_cn}` : supplier.name]);
-    rows.push(["Currency / 货币:", po.currency || "CNY"]);
-    if (po.notes) rows.push(["Notes / 备注:", po.notes]);
+    rows.push(["Số đơn / 订单号:", po.id]);
+    rows.push(["Ngày / 日期:", po.po_date]);
+    rows.push(["Nhà cung cấp / 供应商:", supplier.name_cn ? `${supplier.name} / ${supplier.name_cn}` : supplier.name]);
+    rows.push(["Tiền tệ / 货币:", po.currency || "CNY"]);
+    if (po.notes) rows.push(["Ghi chú / 备注:", po.notes]);
     rows.push([]);
 
     // Bảng chi tiết
     rows.push([
-      "No. / 序号",
-      "SKU Code / 产品编号",
-      "Product Name / 产品名称",
-      "Quantity / 数量",
-      "Unit Price (CNY) / 单价",
-      "Amount (CNY) / 金额"
+      "STT / 序号",
+      "Mã SKU / 产品编号",
+      "Tên sản phẩm / 产品名称",
+      "Số lượng / 数量",
+      "Đơn giá (CNY) / 单价",
+      "Thành tiền (CNY) / 金额"
     ]);
 
     let grandTotal = 0;
@@ -1846,10 +2027,10 @@ function downloadPOExcel(po, supplier) {
       const sku = getSKU(line.sku_id);
       const amount = line.qty * line.price;
       grandTotal += amount;
-      // Ưu tiên tên TQ khi có, fallback EN, cuối cùng VI
+      // Hiển thị tên VI + 中文
       const productName = sku?.name_cn
-        ? `${sku.name_en || sku.name} / ${sku.name_cn}`
-        : (sku?.name_en || sku?.name || "");
+        ? `${sku.name} / ${sku.name_cn}`
+        : (sku?.name || "");
       rows.push([
         idx + 1,
         line.sku_id,
@@ -1861,7 +2042,7 @@ function downloadPOExcel(po, supplier) {
     });
 
     rows.push([]);
-    rows.push(["", "", "", "", "Total / 总计:", grandTotal]);
+    rows.push(["", "", "", "", "Tổng cộng / 总计:", grandTotal]);
 
     // Build workbook
     const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -1875,7 +2056,7 @@ function downloadPOExcel(po, supplier) {
     ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 5 } }];
 
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Purchase Order");
+    XLSX.utils.book_append_sheet(wb, ws, "Đơn đặt hàng");
 
     XLSX.writeFile(wb, `${po.id}_${supplier.name.replace(/\s+/g, "_")}.xlsx`);
   }).catch(err => {
@@ -1893,29 +2074,29 @@ function downloadDeliveryExcel(delivery, pos, warehouse) {
     const firstPO = firstLine ? getPOByLineId(firstLine.po_line_id, pos) : null;
     const supplier = firstPO ? getSupplier(firstPO.supplier_id) : null;
 
-    // Header (bilingual)
-    rows.push(["Shipment Confirmation / 发货确认单"]);
+    // Header (Việt + Trung)
+    rows.push(["PHIẾU XÁC NHẬN GIAO HÀNG / 发货确认单"]);
     rows.push([]);
-    rows.push(["Delivery No. / 发货单号:", delivery.id]);
-    rows.push(["Tracking No. / 物流单号:", delivery.tracking || "—"]);
-    rows.push(["Supplier / 供应商:", supplier ? (supplier.name_cn ? `${supplier.name} / ${supplier.name_cn}` : supplier.name) : "—"]);
-    rows.push(["Origin / 发货地:", "China / 中国"]);
-    rows.push(["Destination / 目的地:", warehouse ? `${warehouse.country} / ${warehouse.name}` : "—"]);
-    rows.push(["Ship Date / 发货日期:", delivery.shipped_date || "—"]);
-    rows.push(["Arrival Date / 到货日期:", delivery.arrived_date || "—"]);
-    rows.push(["Status / 状态:", delivery.arrived_date ? "Arrived / 已到货" : "In Transit / 运输中"]);
-    if (delivery.notes) rows.push(["Notes / 备注:", delivery.notes]);
+    rows.push(["Số phiếu / 发货单号:", delivery.id]);
+    rows.push(["Mã vận đơn / 物流单号:", delivery.tracking || "—"]);
+    rows.push(["Nhà cung cấp / 供应商:", supplier ? (supplier.name_cn ? `${supplier.name} / ${supplier.name_cn}` : supplier.name) : "—"]);
+    rows.push(["Nơi xuất hàng / 发货地:", "Trung Quốc / 中国"]);
+    rows.push(["Nơi nhận / 目的地:", warehouse ? `${warehouse.country} / ${warehouse.name}` : "—"]);
+    rows.push(["Ngày ship / 发货日期:", delivery.shipped_date || "—"]);
+    rows.push(["Ngày đến / 到货日期:", delivery.arrived_date || "—"]);
+    rows.push(["Trạng thái / 状态:", delivery.arrived_date ? "Đã đến / 已到货" : "Đang vận chuyển / 运输中"]);
+    if (delivery.notes) rows.push(["Ghi chú / 备注:", delivery.notes]);
     rows.push([]);
 
     // Bảng chi tiết hàng hóa
     rows.push([
-      "No. / 序号",
-      "PO Ref. / 采购单号",
-      "SKU Code / 产品编号",
-      "Product Name / 产品名称",
-      "Quantity Shipped / 发货数量",
-      "Unit Price (CNY) / 单价",
-      "Amount (CNY) / 金额"
+      "STT / 序号",
+      "Số đơn PO / 采购单号",
+      "Mã SKU / 产品编号",
+      "Tên sản phẩm / 产品名称",
+      "Số lượng ship / 发货数量",
+      "Đơn giá (CNY) / 单价",
+      "Thành tiền (CNY) / 金额"
     ]);
 
     let grandTotal = 0;
@@ -1926,8 +2107,8 @@ function downloadDeliveryExcel(delivery, pos, warehouse) {
       const amount = line.qty * price;
       grandTotal += amount;
       const productName = sku?.name_cn
-        ? `${sku.name_en || sku.name} / ${sku.name_cn}`
-        : (sku?.name_en || sku?.name || "");
+        ? `${sku.name} / ${sku.name_cn}`
+        : (sku?.name || "");
       rows.push([
         idx + 1,
         po?.id || "—",
@@ -1940,15 +2121,15 @@ function downloadDeliveryExcel(delivery, pos, warehouse) {
     });
 
     rows.push([]);
-    rows.push(["", "", "", "", "", "Total / 总计:", grandTotal]);
+    rows.push(["", "", "", "", "", "Tổng cộng / 总计:", grandTotal]);
     rows.push([]);
 
     // Verification block
-    rows.push(["Verification / 核对确认"]);
-    rows.push(["Please confirm the quantities and details above match your shipment records."]);
+    rows.push(["Xác nhận đối soát / 核对确认"]);
+    rows.push(["Vui lòng xác nhận số lượng và thông tin trên có khớp với hồ sơ giao hàng của quý công ty."]);
     rows.push(["请核对上述数量和细节是否与您的发货记录一致。"]);
     rows.push([]);
-    rows.push(["Supplier signature / 供应商签字:", "_______________", "Date / 日期:", "_______________"]);
+    rows.push(["Chữ ký NCC / 供应商签字:", "_______________", "Ngày / 日期:", "_______________"]);
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
 
@@ -1962,7 +2143,7 @@ function downloadDeliveryExcel(delivery, pos, warehouse) {
     ];
 
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Shipment");
+    XLSX.utils.book_append_sheet(wb, ws, "Giao hàng");
 
     const supplierName = supplier ? supplier.name.replace(/\s+/g, "_") : "Shipment";
     XLSX.writeFile(wb, `${delivery.id}_${supplierName}.xlsx`);
@@ -1972,110 +2153,101 @@ function downloadDeliveryExcel(delivery, pos, warehouse) {
   });
 }
 
-// ===== Excel đối soát công nợ cuối tháng / Monthly Reconciliation =====
+// ===== Excel đối soát công nợ cuối tháng (Việt + Trung) =====
 function downloadReconciliationExcel(supplier, startDate, endDate, report) {
   import("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm").then(XLSX => {
     const wb = XLSX.utils.book_new();
     const supplierName = (supplier.name || "SUPPLIER").replace(/[^\w\s-]/g, "").replace(/\s+/g, "_");
-    const reportId = `RECON-${supplier.id}-${endDate.replace(/-/g, "")}`;
+    const reportId = `DOISOAT-${supplier.id}-${endDate.replace(/-/g, "")}`;
 
-    // ========== SHEET 1: SUMMARY / 汇总 ==========
+    // ========== SHEET 1: TỔNG HỢP / 汇总 ==========
     const summary = [];
-    summary.push(["ACCOUNT RECONCILIATION STATEMENT / 对账报表"]);
+    summary.push(["BÁO CÁO ĐỐI SOÁT CÔNG NỢ / 对账报表"]);
     summary.push([]);
-    summary.push(["Report No. / 报表编号:", reportId]);
-    summary.push(["Issue Date / 出具日期:", new Date().toISOString().split("T")[0]]);
-    summary.push(["Period / 对账期间:", `${startDate}  ~  ${endDate}`]);
+    summary.push(["Số báo cáo / 报表编号:", reportId]);
+    summary.push(["Ngày lập / 出具日期:", new Date().toISOString().split("T")[0]]);
+    summary.push(["Kỳ đối soát / 对账期间:", `${startDate}  ~  ${endDate}`]);
     summary.push([]);
 
     // Party info
-    summary.push(["BUYER / 买方:"]);
-    summary.push(["  Company / 公司:", "GoChek · Supply Chain Management"]);
-    summary.push(["  Country / 国家:", "Vietnam"]);
+    summary.push(["BÊN MUA / 买方:"]);
+    summary.push(["  Công ty / 公司:", "GoChek · Quản lý chuỗi cung ứng"]);
+    summary.push(["  Quốc gia / 国家:", "Việt Nam / 越南"]);
     summary.push([]);
-    summary.push(["SUPPLIER / 供应商:"]);
-    summary.push(["  Name / 名称:", supplier.name_cn ? `${supplier.name} / ${supplier.name_cn}` : supplier.name]);
-    summary.push(["  Address / 地址:", supplier.address || "—"]);
-    summary.push(["  Contact / 联系人:", supplier.contact_name || "—"]);
-    summary.push(["  Phone / 电话:", supplier.phone || "—"]);
+    summary.push(["NHÀ CUNG CẤP / 供应商:"]);
+    summary.push(["  Tên / 名称:", supplier.name_cn ? `${supplier.name} / ${supplier.name_cn}` : supplier.name]);
+    summary.push(["  Địa chỉ / 地址:", supplier.address || "—"]);
+    summary.push(["  Người liên hệ / 联系人:", supplier.contact_name || "—"]);
+    summary.push(["  Điện thoại / 电话:", supplier.phone || "—"]);
     summary.push([]);
     summary.push([]);
 
     // Summary table
-    summary.push(["SUMMARY / 对账汇总", "", "CNY", "VND (≈)"]);
+    summary.push(["TỔNG HỢP ĐỐI SOÁT / 对账汇总", "", "CNY", "VND (≈)"]);
     summary.push([
-      "A. Opening Balance / 期初余额", "",
+      "A. Công nợ đầu kỳ / 期初余额", "",
       Math.round(report.openingBalance),
       Math.round(report.openingBalance * CNY_VND_RATE),
     ]);
     summary.push([
-      "B. New Shipments in Period / 本期发货", "",
+      "B. Phát sinh trong kỳ (đã ship) / 本期发货", "",
       Math.round(report.periodShipped),
       Math.round(report.periodShipped * CNY_VND_RATE),
     ]);
     summary.push([
-      "C. Payments in Period / 本期付款", "",
+      "C. Đã thanh toán trong kỳ / 本期付款", "",
       -Math.round(report.periodPaid),
       -Math.round(report.periodPaid * CNY_VND_RATE),
     ]);
     summary.push([
-      "D. Closing Balance / 期末余额 (A + B − C)", "",
+      "D. Công nợ cuối kỳ / 期末余额 (A + B − C)", "",
       Math.round(report.closingBalance),
       Math.round(report.closingBalance * CNY_VND_RATE),
     ]);
     summary.push([]);
-    summary.push(["Exchange Rate / 汇率:", "", `1 CNY = ${CNY_VND_RATE} VND`]);
+    summary.push(["Tỷ giá / 汇率:", "", `1 CNY = ${CNY_VND_RATE} VND`]);
     summary.push([]);
     summary.push([]);
 
     // Verification
-    summary.push(["VERIFICATION / 确认"]);
-    summary.push(["If no response received within 7 days from issue date, the figures above will be considered confirmed."]);
+    summary.push(["XÁC NHẬN / 确认"]);
+    summary.push(["Nếu không nhận được phản hồi trong vòng 7 ngày kể từ ngày lập, các số liệu trên được coi là đã xác nhận."]);
     summary.push(["出具日期起7天内如无异议,上述金额视为确认."]);
     summary.push([]);
     summary.push([]);
-    summary.push(["Prepared by (Buyer) / 买方制表:", "", "Confirmed by (Supplier) / 供应商确认:"]);
+    summary.push(["Bên mua (Người lập) / 买方制表:", "", "Nhà cung cấp xác nhận / 供应商确认:"]);
     summary.push([]);
     summary.push([]);
     summary.push(["_____________________", "", "_____________________"]);
-    summary.push(["Signature & Stamp / 签字盖章", "", "Signature & Stamp / 签字盖章"]);
+    summary.push(["Ký tên & Đóng dấu / 签字盖章", "", "Ký tên & Đóng dấu / 签字盖章"]);
     summary.push([]);
-    summary.push(["Date / 日期: ____________", "", "Date / 日期: ____________"]);
+    summary.push(["Ngày / 日期: ____________", "", "Ngày / 日期: ____________"]);
 
     const ws1 = XLSX.utils.aoa_to_sheet(summary);
-    ws1["!cols"] = [{ wch: 45 }, { wch: 15 }, { wch: 18 }, { wch: 22 }];
-    XLSX.utils.book_append_sheet(wb, ws1, "Summary · 汇总");
+    ws1["!cols"] = [{ wch: 50 }, { wch: 15 }, { wch: 18 }, { wch: 22 }];
+    XLSX.utils.book_append_sheet(wb, ws1, "Tổng hợp · 汇总");
 
-    // ========== SHEET 2: PO DETAIL / 订单明细 ==========
+    // ========== SHEET 2: CHI TIẾT ĐƠN HÀNG / 订单明细 ==========
     const poRows = [
-      ["PO DETAIL / 订单明细"],
-      [`Supplier / 供应商: ${supplier.name}`],
-      [`Period / 期间: ${startDate}  ~  ${endDate}`],
+      ["CHI TIẾT ĐƠN ĐẶT HÀNG / 订单明细"],
+      [`Nhà cung cấp / 供应商: ${supplier.name}`],
+      [`Kỳ / 期间: ${startDate}  ~  ${endDate}`],
       [],
       [
-        "PO No. / 订单号",
-        "PO Date / 下单日期",
-        "Status / 状态",
-        "Total Value (CNY) / 总金额",
-        "Shipped (CNY) / 已发货",
-        "Paid (CNY) / 已付款",
-        "Outstanding (CNY) / 未付",
-        "Note / 备注",
+        "Số đơn / 订单号",
+        "Ngày đặt / 下单日期",
+        "Trạng thái / 状态",
+        "Tổng giá trị (CNY) / 总金额",
+        "Đã ship (CNY) / 已发货",
+        "Đã trả (CNY) / 已付款",
+        "Còn nợ (CNY) / 未付",
+        "Ghi chú / 备注",
       ],
     ];
 
     // Phân bổ payment FIFO để tính Paid per PO
     const sortedPOs = [...report.allPOs].sort((a, b) => new Date(a.po_date) - new Date(b.po_date));
-    let remainingPaid = report.paymentsInPeriod.reduce((s, p) => s + p.amount_cny, 0);
-    // Cộng thêm payment trước kỳ để phân bổ FIFO đúng
-    const allPayments = []; // payments historical (chỉ lấy total to distribute, simple FIFO by shipped)
-    // Simplify: tổng paid của NCC dựa trên mọi payment applied
-    // Ở đây dùng allPOs với dữ liệu đang có — paid chỉ tính đến endDate
 
-    let totalPaidCum = 0;
-    // Với prototype: sort payments theo date, áp FIFO đến endDate
-    const allSupplierPayments = []; // placeholder — logic này cần data từ props
-    // Simpler: dùng shipped/qty_delivered * price → tính shipped value; paid phân bổ FIFO
     const rowsWithCalc = sortedPOs.map(po => {
       const totalValue = po.lines.reduce((s, l) => s + l.qty * l.price, 0);
       const shippedValue = po.is_proxy
@@ -2084,17 +2256,7 @@ function downloadReconciliationExcel(supplier, startDate, endDate, report) {
       return { po, totalValue, shippedValue, paidValue: 0, outstanding: shippedValue };
     });
 
-    // Phân bổ: totalPaid của NCC trong KỲ + trước KỲ (tất cả payment của NCC tính đến endDate)
-    // Với report hiện có, ta không có allHistoricalPayments → approximate:
-    //   totalEverPaid = openingPaid + periodPaid
-    //   Đưa vào biến report chuyền từ caller — update sau nếu cần
-    // Dùng "remainingPaid" kế thừa tương tự bảng PO history
-    const totalEverPaid = (report.openingBalance !== undefined)
-      ? (report.openingBalance >= 0
-          ? (rowsWithCalc.reduce((s, r) => s + r.shippedValue, 0) - report.openingBalance - report.periodShipped + report.periodPaid)
-          : 0) + report.periodPaid
-      : report.periodPaid;
-    // Fallback đơn giản: periodPaid (chưa bao gồm trước kỳ)
+    // Phân bổ FIFO
     let pool = report.periodPaid + Math.max(0, rowsWithCalc.reduce((s, r) => s + r.shippedValue, 0) - report.openingBalance - report.periodShipped);
 
     rowsWithCalc.forEach(r => {
@@ -2105,28 +2267,32 @@ function downloadReconciliationExcel(supplier, startDate, endDate, report) {
     });
 
     const statusLabels = {
-      draft: "Draft/草稿", pending: "Pending/待审批", approved: "Approved/已批准",
-      sent: "Sent/已发送", confirmed: "Confirmed/已确认",
-      partial_delivered: "Partial/部分交付", received: "Received/已收货",
-      rejected: "Rejected/已拒绝",
+      draft: "Nháp / 草稿",
+      pending: "Chờ duyệt / 待审批",
+      approved: "Đã duyệt / 已批准",
+      sent: "Đã gửi NCC / 已发送",
+      confirmed: "Đã xác nhận / 已确认",
+      partial_delivered: "Giao 1 phần / 部分交付",
+      received: "Đã giao đủ / 已收货",
+      rejected: "Bị từ chối / 已拒绝",
     };
 
     rowsWithCalc.forEach(r => {
       poRows.push([
-        r.po.is_proxy ? `${r.po.id} (PROXY/代付)` : r.po.id,
+        r.po.is_proxy ? `${r.po.id} (Ủy thác/代付)` : r.po.id,
         r.po.po_date,
         statusLabels[r.po.status] || r.po.status,
         Math.round(r.totalValue),
         Math.round(r.shippedValue),
         Math.round(r.paidValue),
         Math.round(r.outstanding),
-        r.po.is_proxy ? (r.po.notes || "Proxy payment / 代付") : (r.po.notes || ""),
+        r.po.is_proxy ? (r.po.notes || "Ủy thác trả hộ / 代付") : (r.po.notes || ""),
       ]);
     });
 
     poRows.push([]);
     poRows.push([
-      "TOTAL / 合计", "", "",
+      "TỔNG CỘNG / 合计", "", "",
       Math.round(rowsWithCalc.reduce((s, r) => s + r.totalValue, 0)),
       Math.round(rowsWithCalc.reduce((s, r) => s + r.shippedValue, 0)),
       Math.round(rowsWithCalc.reduce((s, r) => s + r.paidValue, 0)),
@@ -2136,23 +2302,23 @@ function downloadReconciliationExcel(supplier, startDate, endDate, report) {
 
     const ws2 = XLSX.utils.aoa_to_sheet(poRows);
     ws2["!cols"] = [
-      { wch: 28 }, { wch: 14 }, { wch: 22 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 30 },
+      { wch: 28 }, { wch: 14 }, { wch: 24 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 30 },
     ];
-    XLSX.utils.book_append_sheet(wb, ws2, "PO Detail · 订单明细");
+    XLSX.utils.book_append_sheet(wb, ws2, "Đơn hàng · 订单");
 
-    // ========== SHEET 3: PAYMENTS / 付款明细 ==========
+    // ========== SHEET 3: THANH TOÁN / 付款明细 ==========
     const payRows = [
-      ["PAYMENTS / 付款明细"],
-      [`Supplier / 供应商: ${supplier.name}`],
-      [`Period / 期间: ${startDate}  ~  ${endDate}`],
+      ["CHI TIẾT THANH TOÁN / 付款明细"],
+      [`Nhà cung cấp / 供应商: ${supplier.name}`],
+      [`Kỳ / 期间: ${startDate}  ~  ${endDate}`],
       [],
       [
-        "Date / 日期",
-        "Amount (CNY) / 金额",
-        "Exchange Rate / 汇率",
-        "Amount (VND) / 越南盾",
-        "Method / 方式",
-        "Applied to PO / 对应订单",
+        "Ngày / 日期",
+        "Số tiền (CNY) / 金额",
+        "Tỷ giá / 汇率",
+        "Số tiền (VND) / 越南盾",
+        "Phương thức / 方式",
+        "Áp dụng cho PO / 对应订单",
       ],
     ];
 
@@ -2160,8 +2326,8 @@ function downloadReconciliationExcel(supplier, startDate, endDate, report) {
       const rate = p.rate || CNY_VND_RATE;
       const methodMap = {
         pingpong: "Pingpong",
-        import_cash: "Import Cash / 进口资金",
-        other: "Other / 其他",
+        import_cash: "Tiền nhập khẩu / 进口资金",
+        other: "Khác / 其他",
       };
       payRows.push([
         p.date,
@@ -2175,7 +2341,7 @@ function downloadReconciliationExcel(supplier, startDate, endDate, report) {
 
     payRows.push([]);
     payRows.push([
-      "TOTAL / 合计",
+      "TỔNG CỘNG / 合计",
       Math.round(report.paymentsInPeriod.reduce((s, p) => s + p.amount_cny, 0)),
       "",
       Math.round(report.paymentsInPeriod.reduce((s, p) => s + p.amount_cny * (p.rate || CNY_VND_RATE), 0)),
@@ -2184,30 +2350,35 @@ function downloadReconciliationExcel(supplier, startDate, endDate, report) {
 
     const ws3 = XLSX.utils.aoa_to_sheet(payRows);
     ws3["!cols"] = [
-      { wch: 14 }, { wch: 18 }, { wch: 14 }, { wch: 22 }, { wch: 22 }, { wch: 30 },
+      { wch: 14 }, { wch: 18 }, { wch: 14 }, { wch: 22 }, { wch: 24 }, { wch: 30 },
     ];
-    XLSX.utils.book_append_sheet(wb, ws3, "Payments · 付款明细");
+    XLSX.utils.book_append_sheet(wb, ws3, "Thanh toán · 付款");
 
-    // ========== SHEET 4: DELIVERIES / 发货明细 ==========
+    // ========== SHEET 4: GIAO HÀNG / 发货明细 ==========
     const delRows = [
-      ["DELIVERIES / 发货明细"],
-      [`Supplier / 供应商: ${supplier.name}`],
-      [`Period / 期间: ${startDate}  ~  ${endDate}`],
+      ["CHI TIẾT GIAO HÀNG / 发货明细"],
+      [`Nhà cung cấp / 供应商: ${supplier.name}`],
+      [`Kỳ / 期间: ${startDate}  ~  ${endDate}`],
       [],
       [
-        "Shipped Date / 发货日期",
-        "Tracking / 物流单号",
-        "Destination / 到达国",
-        "PO No. / 订单号",
+        "Ngày ship / 发货日期",
+        "Mã vận đơn / 物流单号",
+        "Nơi nhận / 到达国",
+        "Số đơn PO / 订单号",
         "SKU",
-        "Qty / 数量",
-        "Unit Price (CNY) / 单价",
-        "Total (CNY) / 小计",
-        "Arrived / 到货状态",
+        "Số lượng / 数量",
+        "Đơn giá (CNY) / 单价",
+        "Thành tiền (CNY) / 小计",
+        "Trạng thái / 到货状态",
       ],
     ];
 
-    const destMap = { "W-VN": "Vietnam", "W-TH": "Thailand", "W-MY": "Malaysia", "W-PH": "Philippines" };
+    const destMap = {
+      "W-VN": "Việt Nam / 越南",
+      "W-TH": "Thái Lan / 泰国",
+      "W-MY": "Malaysia / 马来西亚",
+      "W-PH": "Philippines / 菲律宾",
+    };
 
     report.deliveriesInPeriod.forEach(d => {
       d.lines.forEach(dl => {
@@ -2223,7 +2394,7 @@ function downloadReconciliationExcel(supplier, startDate, endDate, report) {
           dl.qty,
           dl.unit_price,
           Math.round(dl.qty * dl.unit_price),
-          d.status === "arrived" ? `Arrived/${d.arrived_date || ""}` : "In transit/运输中",
+          d.status === "arrived" ? `Đã đến / 已到货 (${d.arrived_date || ""})` : "Đang vận chuyển / 运输中",
         ]);
       });
     });
@@ -2234,19 +2405,19 @@ function downloadReconciliationExcel(supplier, startDate, endDate, report) {
     const totalShipQty = report.deliveriesInPeriod.reduce((s, d) =>
       s + d.lines.reduce((ss, l) => ss + l.qty, 0), 0);
     delRows.push([
-      "TOTAL / 合计", "", "", "", "",
+      "TỔNG CỘNG / 合计", "", "", "", "",
       totalShipQty, "",
       Math.round(totalShipCny), "",
     ]);
 
     const ws4 = XLSX.utils.aoa_to_sheet(delRows);
     ws4["!cols"] = [
-      { wch: 14 }, { wch: 22 }, { wch: 14 }, { wch: 18 }, { wch: 30 },
-      { wch: 10 }, { wch: 16 }, { wch: 16 }, { wch: 20 },
+      { wch: 14 }, { wch: 22 }, { wch: 18 }, { wch: 18 }, { wch: 30 },
+      { wch: 12 }, { wch: 16 }, { wch: 18 }, { wch: 28 },
     ];
-    XLSX.utils.book_append_sheet(wb, ws4, "Deliveries · 发货明细");
+    XLSX.utils.book_append_sheet(wb, ws4, "Giao hàng · 发货");
 
-    const fileName = `Reconciliation_${supplierName}_${endDate.replace(/-/g, "")}.xlsx`;
+    const fileName = `DoiSoat_${supplierName}_${endDate.replace(/-/g, "")}.xlsx`;
     XLSX.writeFile(wb, fileName);
   }).catch(err => {
     console.error("Không tải được xlsx library:", err);
@@ -2700,7 +2871,7 @@ function SupplierDetailPanel({ supplier, pos, deliveries, supplierDebts, onClose
   );
 }
 
-function DeliveriesView({ pos, deliveries, lots, setModal, onMarkArrived, onUpdateTracking, currentUser }) {
+function DeliveriesView({ pos, deliveries, lots, shipments, carriers, getShipment, setModal, onMarkArrived, onUpdateTracking, onToggleDocs, onToggleShippingPaid, onUpdateShippingFee, onUpdateShipmentNotes, onUpdateShipmentCarrier, currentUser }) {
   const [filter, setFilter] = useState("all");
   const [selected, setSelected] = useState(null);
   const [confirmArrive, setConfirmArrive] = useState(null);
@@ -2796,6 +2967,59 @@ function DeliveriesView({ pos, deliveries, lots, setModal, onMarkArrived, onUpda
         )}
       </div>
 
+      {/* KPI hàng hóa & chứng từ */}
+      {(() => {
+        // Đang vận chuyển (chưa về kho)
+        const inTransitDels = deliveries.filter(d => d.status === "in_transit");
+        const inTransitValue = inTransitDels.reduce((sum, d) =>
+          sum + d.lines.reduce((s, l) => s + l.qty * l.unit_price, 0), 0);
+        const inTransitQty = inTransitDels.reduce((sum, d) =>
+          sum + d.lines.reduce((s, l) => s + l.qty, 0), 0);
+
+        // Đã về kho
+        const arrivedDels = deliveries.filter(d => d.status === "arrived");
+        const arrivedValue = arrivedDels.reduce((sum, d) =>
+          sum + d.lines.reduce((s, l) => s + l.qty * l.unit_price, 0), 0);
+
+        // Chứng từ chưa đủ (theo tracking của delivery đã về)
+        const activeTrackings = [...new Set(deliveries.filter(d => d.tracking).map(d => d.tracking))];
+        const missingDocs = activeTrackings.filter(t => {
+          const sh = getShipment(t);
+          if (sh.docs_completed) return false;
+          return deliveries.some(d => d.tracking === t && d.status === "arrived");
+        });
+
+        return (
+          <div className="grid grid-cols-3 gap-4 mb-6">
+            <div className="bg-white border border-[#e5dfd1] p-5 border-l-4" style={{ borderLeftColor: inTransitValue > 0 ? "#c4a962" : "#8a96a8" }}>
+              <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Giá trị lô đang trung chuyển</div>
+              <div className="text-2xl mono font-medium mt-2" style={{ color: inTransitValue > 0 ? "#c4a962" : "#1a2332" }}>
+                {formatCNY(inTransitValue)}
+              </div>
+              <div className="text-xs text-[#5a6578] mt-1">
+                {inTransitDels.length} lô · {inTransitQty.toLocaleString()} cái · ≈ {formatVND(inTransitValue * CNY_VND_RATE)}
+              </div>
+            </div>
+            <div className="bg-white border border-[#e5dfd1] p-5 border-l-4" style={{ borderLeftColor: missingDocs.length > 0 ? "#c4a962" : "#4a7c59" }}>
+              <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Chưa hoàn thiện chứng từ</div>
+              <div className="text-2xl mono font-medium mt-2" style={{ color: missingDocs.length > 0 ? "#c4a962" : "#4a7c59" }}>
+                {missingDocs.length}
+              </div>
+              <div className="text-xs text-[#5a6578] mt-1">
+                lô hàng đã về nhưng thiếu chứng từ
+              </div>
+            </div>
+            <div className="bg-white border border-[#e5dfd1] p-5 border-l-4 border-l-[#4a7c59]">
+              <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Giá trị lô đã về kho</div>
+              <div className="text-2xl mono font-medium mt-2 text-[#4a7c59]">{formatCNY(arrivedValue)}</div>
+              <div className="text-xs text-[#5a6578] mt-1">
+                {arrivedDels.length} lô · ≈ {formatVND(arrivedValue * CNY_VND_RATE)}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       <div className="flex items-center gap-2 mb-6">
         <span className="text-xs uppercase tracking-wider text-[#8a7c4f]">Lọc theo nước:</span>
         <div className="flex gap-1 bg-white border border-[#e5dfd1]">
@@ -2856,6 +3080,8 @@ function DeliveriesView({ pos, deliveries, lots, setModal, onMarkArrived, onUpda
               <th className="text-right px-4 py-2.5">Tổng SL</th>
               <th className="text-right px-4 py-2.5">Giá trị</th>
               <th className="text-left px-4 py-2.5">Ngày ship</th>
+              <th className="text-left px-4 py-2.5">Vận chuyển</th>
+              <th className="text-center px-4 py-2.5">Chứng từ · Phí VC</th>
               <th className="text-left px-4 py-2.5">Trạng thái</th>
               <th className="px-4 py-2.5"></th>
             </tr>
@@ -2959,6 +3185,55 @@ function DeliveriesView({ pos, deliveries, lots, setModal, onMarkArrived, onUpda
                   <td className="px-4 py-2.5 text-right mono text-sm cursor-pointer" onClick={() => setSelected(d)}>{totalQty.toLocaleString()}</td>
                   <td className="px-4 py-2.5 text-right mono text-sm cursor-pointer" onClick={() => setSelected(d)}>{formatCNY(totalValue)}</td>
                   <td className="px-4 py-2.5 text-[#5a6578] text-xs mono cursor-pointer" onClick={() => setSelected(d)}>{d.shipped_date}</td>
+                  <td className="px-4 py-2.5 text-xs cursor-pointer" onClick={() => setSelected(d)}>
+                    {(() => {
+                      const sh = d.tracking ? getShipment(d.tracking) : null;
+                      const carrier = sh?.carrier_id ? getCarrier(sh.carrier_id, carriers) : null;
+                      if (!carrier) return <span className="text-[10px] text-[#8a96a8]">—</span>;
+                      return (
+                        <div className="flex items-center gap-1.5">
+                          <Truck size={12} className="text-[#5a6578]" />
+                          <span className="font-medium text-[#1a2332]">{carrier.code}</span>
+                        </div>
+                      );
+                    })()}
+                  </td>
+                  <td className="px-4 py-2.5 cursor-pointer" onClick={() => setSelected(d)}>
+                    {(() => {
+                      const sh = d.tracking ? getShipment(d.tracking) : null;
+                      if (!sh) return <span className="text-[10px] text-[#8a96a8]">—</span>;
+                      return (
+                        <div className="flex items-center justify-center gap-1.5">
+                          {/* Badge chứng từ */}
+                          <span
+                            className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 font-medium whitespace-nowrap"
+                            style={sh.docs_completed
+                              ? { backgroundColor: "#e0ede4", color: "#4a7c59" }
+                              : { backgroundColor: "#f5f2eb", color: "#8a96a8" }}
+                            title={sh.docs_completed ? "Chứng từ đã hoàn thiện (chung cho lô)" : "Chưa hoàn thiện chứng từ"}
+                          >
+                            📄 {sh.docs_completed ? "✓" : "—"}
+                          </span>
+                          {/* Badge phí VC */}
+                          {sh.shipping_fee_cny > 0 ? (
+                            <span
+                              className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 font-medium whitespace-nowrap mono"
+                              style={sh.shipping_fee_paid
+                                ? { backgroundColor: "#e0ede4", color: "#4a7c59" }
+                                : { backgroundColor: "#fae5dd", color: "#d97757" }}
+                              title={sh.shipping_fee_paid
+                                ? `Đã trả phí ${formatCNY(sh.shipping_fee_cny)} (chung cho lô)`
+                                : `Còn nợ vận chuyển ${formatCNY(sh.shipping_fee_cny)}`}
+                            >
+                              💰 {sh.shipping_fee_paid ? "✓" : formatCNY(sh.shipping_fee_cny)}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-[#8a96a8]">—</span>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </td>
                   <td className="px-4 py-2.5 cursor-pointer" onClick={() => setSelected(d)}><StatusBadge status={d.status} /></td>
                   <td className="px-4 py-2.5">
                     {d.status === "in_transit" ? (
@@ -2988,7 +3263,7 @@ function DeliveriesView({ pos, deliveries, lots, setModal, onMarkArrived, onUpda
         <Pagination currentPage={currentPage} totalPages={totalPages} totalItems={filtered.length} pageSize={PAGE_SIZE} onChange={setPage} />
       </div>
 
-      {selected && <DeliveryDetail delivery={selected} pos={pos} lots={lots} onRequestArrival={() => { setConfirmArrive(selected); setSelected(null); }} onClose={() => setSelected(null)} />}
+      {selected && <DeliveryDetail delivery={deliveries.find(d => d.id === selected.id) || selected} pos={pos} lots={lots} shipment={selected.tracking ? getShipment(selected.tracking) : null} groupDeliveries={selected.tracking ? deliveries.filter(d => d.tracking === selected.tracking) : []} carriers={carriers} currentUser={currentUser} onRequestArrival={() => { setConfirmArrive(selected); setSelected(null); }} onClose={() => setSelected(null)} onToggleDocs={onToggleDocs} onToggleShippingPaid={onToggleShippingPaid} onUpdateShippingFee={onUpdateShippingFee} onUpdateShipmentNotes={onUpdateShipmentNotes} onUpdateShipmentCarrier={onUpdateShipmentCarrier} />}
 
       {confirmArrive && (
         <ConfirmArrivalModal
@@ -3004,14 +3279,37 @@ function DeliveriesView({ pos, deliveries, lots, setModal, onMarkArrived, onUpda
   );
 }
 
-function DeliveryDetail({ delivery, pos, lots, onRequestArrival, onClose }) {
+function DeliveryDetail({ delivery, pos, lots, shipment, groupDeliveries, carriers, currentUser, onRequestArrival, onClose, onToggleDocs, onToggleShippingPaid, onUpdateShippingFee, onUpdateShipmentNotes, onUpdateShipmentCarrier }) {
+  const [editingFee, setEditingFee] = useState(false);
+  const [feeInput, setFeeInput] = useState(shipment?.shipping_fee_cny || 0);
+  const [editingNotes, setEditingNotes] = useState(false);
+  const [notesInput, setNotesInput] = useState(shipment?.notes || "");
+  const [editingCarrier, setEditingCarrier] = useState(false);
+  const [carrierInput, setCarrierInput] = useState(shipment?.carrier_id || "");
+  const currentCarrier = shipment?.carrier_id ? getCarrier(shipment.carrier_id, carriers) : null;
   const wh = getWarehouse(delivery.destination_id);
   const totalValue = delivery.lines.reduce((s, l) => s + l.qty * l.unit_price, 0);
   const freightRate = wh.freightRate || 2.5;
   const freightTotal = delivery.lines.reduce((s, l) => s + l.qty * freightRate, 0);
   const vatTotal = totalValue * wh.vat;
+  const canEdit = can(currentUser, "edit_delivery", { delivery }) || currentUser?.role === "admin";
+  const tracking = delivery.tracking;
+  const groupCount = groupDeliveries?.length || 1;
+  const isGrouped = groupCount > 1;
 
   const handleDownloadExcel = () => downloadDeliveryExcel(delivery, pos, wh);
+  const handleSaveFee = () => {
+    onUpdateShippingFee(tracking, feeInput);
+    setEditingFee(false);
+  };
+  const handleSaveNotes = () => {
+    onUpdateShipmentNotes(tracking, notesInput);
+    setEditingNotes(false);
+  };
+  const handleSaveCarrier = () => {
+    onUpdateShipmentCarrier(tracking, carrierInput || null);
+    setEditingCarrier(false);
+  };
 
   return (
     <div className="fixed inset-0 bg-[#1e4d7b]/98 backdrop-blur-md flex justify-end z-50" onClick={onClose}>
@@ -3029,7 +3327,7 @@ function DeliveryDetail({ delivery, pos, lots, onRequestArrival, onClose }) {
           <button onClick={handleDownloadExcel}
             className="w-full py-3 bg-[#1a2332] text-[#f5f2eb] hover:bg-[#2a3547] text-sm font-medium flex items-center justify-center gap-2">
             <Download size={16} />
-            Tải Excel đối soát NCC · Shipment Confirmation (EN + 中文)
+            Tải Excel đối soát NCC · Phiếu giao hàng (Việt + 中文)
           </button>
           <div className="text-[10px] text-[#8a7c4f] mt-2 text-center italic">
             File Excel song ngữ, gửi NCC xác nhận lại số lượng hàng đã ship
@@ -3037,6 +3335,231 @@ function DeliveryDetail({ delivery, pos, lots, onRequestArrival, onClose }) {
         </div>
 
         <div className="p-6 space-y-6">
+          {/* Chứng từ & Phí vận chuyển — theo tracking */}
+          {tracking ? (
+            <div className="bg-white border p-5" style={{ borderColor: isGrouped ? "#4a7bb8" : "#e5dfd1" }}>
+              <div className="flex items-start justify-between mb-3">
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Chứng từ & Phí vận chuyển</div>
+                  <div className="text-xs mono mt-1 text-[#1a2332]">Tracking: {tracking}</div>
+                </div>
+                {isGrouped && (
+                  <span className="text-[10px] px-2 py-1 font-medium whitespace-nowrap" style={{ backgroundColor: "#dbe8f5", color: "#185fa5" }}>
+                    🔗 Gộp {groupCount} delivery
+                  </span>
+                )}
+              </div>
+
+              {isGrouped && (
+                <div className="mb-4 p-3 text-xs" style={{ backgroundColor: "#dbe8f5", color: "#185fa5" }}>
+                  <div className="font-medium mb-1">⚠ Lưu ý: thao tác áp dụng cho cả lô</div>
+                  <div className="text-[11px] leading-relaxed">
+                    {groupCount} delivery cùng dùng tracking này ({groupDeliveries.map(d => `${d.id} (${getWarehouse(d.destination_id)?.code})`).join(", ")}).
+                    Chứng từ và phí vận chuyển được ghi nhận chung cho cả lô, không tách riêng.
+                  </div>
+                </div>
+              )}
+
+              {/* Checklist chứng từ */}
+              <div className="space-y-3">
+                {/* Đơn vị vận chuyển */}
+                <div className="p-3 border border-[#e5dfd1] bg-white">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Đơn vị vận chuyển</div>
+                    {canEdit && !editingCarrier && (
+                      <button onClick={() => { setCarrierInput(shipment.carrier_id || ""); setEditingCarrier(true); }}
+                        className="text-[10px] text-[#4a7bb8] hover:underline flex items-center gap-1">
+                        <Edit2 size={10} /> {currentCarrier ? "Đổi" : "Chọn"}
+                      </button>
+                    )}
+                  </div>
+                  {editingCarrier ? (
+                    <div className="flex items-center gap-2">
+                      <select value={carrierInput} onChange={e => setCarrierInput(e.target.value)} autoFocus
+                        className="flex-1 px-3 py-2 bg-white border border-[#c4a962] outline-none text-sm">
+                        <option value="">— Chưa chọn —</option>
+                        {carriers.filter(c => c.status === "active").map(c => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}{c.name_cn ? ` · ${c.name_cn}` : ""} ({c.code})
+                          </option>
+                        ))}
+                      </select>
+                      <button onClick={handleSaveCarrier}
+                        className="px-3 py-2 text-xs font-medium"
+                        style={{ backgroundColor: "#c4a962", color: "#1a2332" }}>
+                        Lưu
+                      </button>
+                      <button onClick={() => setEditingCarrier(false)}
+                        className="px-3 py-2 text-xs text-[#5a6578]">
+                        Hủy
+                      </button>
+                    </div>
+                  ) : currentCarrier ? (
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Truck size={16} className="text-[#1a2332]" />
+                        <div className="text-sm font-medium text-[#1a2332]">{currentCarrier.name}</div>
+                        {currentCarrier.name_cn && <span className="text-xs text-[#5a6578]">· {currentCarrier.name_cn}</span>}
+                      </div>
+                      <div className="text-[10px] text-[#5a6578] mt-1 mono">
+                        {currentCarrier.code} · {currentCarrier.phone || "—"}
+                        {currentCarrier.payment_terms && ` · ${currentCarrier.payment_terms}`}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-[#8a96a8] italic">— Chưa chọn đơn vị vận chuyển —</div>
+                  )}
+                </div>
+
+                <button
+                  onClick={() => canEdit && onToggleDocs(tracking)}
+                  disabled={!canEdit}
+                  className="w-full flex items-center gap-3 p-3 border transition-all disabled:cursor-not-allowed"
+                  style={shipment.docs_completed
+                    ? { backgroundColor: "#e0ede4", borderColor: "#4a7c59" }
+                    : { backgroundColor: "#faf8f2", borderColor: "#e5dfd1" }}
+                >
+                  <div className="flex items-center justify-center w-6 h-6 border-2 flex-shrink-0"
+                    style={shipment.docs_completed
+                      ? { backgroundColor: "#4a7c59", borderColor: "#4a7c59" }
+                      : { backgroundColor: "#ffffff", borderColor: "#8a96a8" }}>
+                    {shipment.docs_completed && <CheckCircle2 size={14} color="#ffffff" strokeWidth={3} />}
+                  </div>
+                  <div className="flex-1 text-left">
+                    <div className="text-sm font-medium text-[#1a2332]">
+                      {shipment.docs_completed ? "✓ Đã hoàn thiện bộ chứng từ" : "Chưa hoàn thiện bộ chứng từ"}
+                    </div>
+                    <div className="text-[10px] text-[#5a6578] italic mt-0.5">
+                      Invoice · Packing list · B/L · CO (nếu có) · Tờ khai HQ
+                    </div>
+                  </div>
+                </button>
+
+                {/* Phí vận chuyển */}
+                <div className="p-3 border border-[#e5dfd1] bg-[#faf8f2]">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">
+                      Phí vận chuyển {isGrouped && <span className="text-[10px] normal-case italic text-[#8a96a8]">(chung cho {groupCount} delivery)</span>}
+                    </div>
+                    {canEdit && !editingFee && (
+                      <button onClick={() => { setFeeInput(shipment.shipping_fee_cny); setEditingFee(true); }}
+                        className="text-[10px] text-[#4a7bb8] hover:underline flex items-center gap-1">
+                        <Edit2 size={10} /> Sửa
+                      </button>
+                    )}
+                  </div>
+
+                  {editingFee ? (
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 flex items-center gap-1">
+                        <span className="text-sm mono text-[#8a7c4f]">¥</span>
+                        <input
+                          type="number"
+                          value={feeInput}
+                          onChange={e => setFeeInput(e.target.value)}
+                          autoFocus
+                          className="flex-1 px-3 py-2 bg-white border border-[#c4a962] outline-none text-sm mono"
+                        />
+                      </div>
+                      <button onClick={handleSaveFee}
+                        className="px-3 py-2 text-xs font-medium"
+                        style={{ backgroundColor: "#c4a962", color: "#1a2332" }}>
+                        Lưu
+                      </button>
+                      <button onClick={() => setEditingFee(false)}
+                        className="px-3 py-2 text-xs text-[#5a6578]">
+                        Hủy
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="text-2xl mono font-medium text-[#1a2332]">
+                      {formatCNY(shipment.shipping_fee_cny)}
+                      <span className="text-xs text-[#8a96a8] ml-2 font-normal">
+                        ≈ {formatVND(shipment.shipping_fee_cny * CNY_VND_RATE)}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Trạng thái thanh toán phí VC */}
+                <button
+                  onClick={() => canEdit && shipment.shipping_fee_cny > 0 && onToggleShippingPaid(tracking)}
+                  disabled={!canEdit || shipment.shipping_fee_cny === 0}
+                  className="w-full flex items-center gap-3 p-3 border transition-all disabled:cursor-not-allowed disabled:opacity-60"
+                  style={shipment.shipping_fee_paid
+                    ? { backgroundColor: "#e0ede4", borderColor: "#4a7c59" }
+                    : { backgroundColor: "#fae5dd", borderColor: "#d97757" }}
+                >
+                  <div className="flex items-center justify-center w-6 h-6 border-2 flex-shrink-0"
+                    style={shipment.shipping_fee_paid
+                      ? { backgroundColor: "#4a7c59", borderColor: "#4a7c59" }
+                      : { backgroundColor: "#ffffff", borderColor: "#d97757" }}>
+                    {shipment.shipping_fee_paid && <CheckCircle2 size={14} color="#ffffff" strokeWidth={3} />}
+                  </div>
+                  <div className="flex-1 text-left">
+                    <div className="text-sm font-medium text-[#1a2332]">
+                      {shipment.shipping_fee_paid
+                        ? `✓ Đã thanh toán phí vận chuyển${shipment.paid_date ? ` · ${shipment.paid_date}` : ""}`
+                        : (shipment.shipping_fee_cny > 0 ? "Chưa thanh toán phí vận chuyển" : "Chưa có phí vận chuyển")}
+                    </div>
+                    {shipment.shipping_fee_cny > 0 && !shipment.shipping_fee_paid && (
+                      <div className="text-[10px] text-[#8b3a3a] italic mt-0.5">
+                        Còn nợ đơn vị vận chuyển: {formatCNY(shipment.shipping_fee_cny)}
+                      </div>
+                    )}
+                  </div>
+                </button>
+
+                {/* Ghi chú logistics */}
+                <div className="p-3 border border-[#e5dfd1]">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Ghi chú logistics</div>
+                    {canEdit && !editingNotes && (
+                      <button onClick={() => { setNotesInput(shipment.notes || ""); setEditingNotes(true); }}
+                        className="text-[10px] text-[#4a7bb8] hover:underline flex items-center gap-1">
+                        <Edit2 size={10} /> Sửa
+                      </button>
+                    )}
+                  </div>
+                  {editingNotes ? (
+                    <div>
+                      <textarea
+                        value={notesInput}
+                        onChange={e => setNotesInput(e.target.value)}
+                        rows={2}
+                        autoFocus
+                        placeholder="VD: Thiếu B/L, chờ cuối tháng thanh toán chung..."
+                        className="w-full px-3 py-2 bg-white border border-[#c4a962] outline-none text-xs resize-none"
+                      />
+                      <div className="mt-2 flex justify-end gap-2">
+                        <button onClick={() => setEditingNotes(false)} className="px-3 py-1 text-xs text-[#5a6578]">Hủy</button>
+                        <button onClick={handleSaveNotes}
+                          className="px-3 py-1 text-xs font-medium"
+                          style={{ backgroundColor: "#c4a962", color: "#1a2332" }}>
+                          Lưu
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-xs text-[#5a6578] italic">
+                      {shipment.notes || "— Chưa có ghi chú —"}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {!canEdit && (
+                <div className="text-[10px] text-[#8a96a8] italic mt-3 text-center">
+                  Bạn không có quyền chỉnh sửa · Chỉ xem
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="bg-[#faf8f2] border border-[#e5dfd1] p-4 text-xs text-[#8a7c4f] italic">
+              Delivery này chưa có tracking. Thêm tracking trước để quản lý chứng từ và phí vận chuyển.
+            </div>
+          )}
+
           <div className="bg-white border border-[#e5dfd1] p-5">
             <div className="text-xs uppercase tracking-wider text-[#8a7c4f] mb-3">Lộ trình</div>
             <div className="flex items-center gap-3">
@@ -3563,6 +4086,576 @@ function UserFormModal({ mode, user, onClose, onCreate, onUpdate }) {
   );
 }
 
+function CarriersView({ carriers, shipments, deliveries, pos, setModal, onToggleStatus, onToggleShippingPaid, onToggleDocs, currentUser }) {
+  const [selected, setSelected] = useState(null);
+  const canCreate = can(currentUser, "create_carrier") || currentUser?.role === "admin";
+  const canEdit = can(currentUser, "edit_delivery") || currentUser?.role === "admin" || currentUser?.role === "operator";
+
+  // Tính debt theo carrier
+  const carrierStats = useMemo(() => {
+    const m = {};
+    carriers.forEach(c => {
+      m[c.id] = { unpaid: 0, paid: 0, shipmentCount: 0, deliveryCount: 0 };
+    });
+    shipments.forEach(sh => {
+      if (!sh.carrier_id) return;
+      if (!m[sh.carrier_id]) return;
+      m[sh.carrier_id].shipmentCount++;
+      if (sh.shipping_fee_paid) {
+        m[sh.carrier_id].paid += sh.shipping_fee_cny || 0;
+      } else {
+        m[sh.carrier_id].unpaid += sh.shipping_fee_cny || 0;
+      }
+      m[sh.carrier_id].deliveryCount += deliveries.filter(d => d.tracking === sh.tracking).length;
+    });
+    return m;
+  }, [carriers, shipments, deliveries]);
+
+  const totalUnpaid = Object.values(carrierStats).reduce((s, v) => s + v.unpaid, 0);
+  const totalPaid = Object.values(carrierStats).reduce((s, v) => s + v.paid, 0);
+  const activeCarriers = carriers.filter(c => c.status === "active").length;
+
+  return (
+    <div className="p-10 animate-in">
+      <div className="flex items-baseline justify-between mb-8">
+        <div>
+          <div className="text-xs uppercase tracking-[0.2em] text-[#8a7c4f]">Carriers · 物流公司</div>
+          <h1 className="text-4xl font-light mt-2">Đơn vị vận chuyển</h1>
+          <p className="text-sm text-[#5a6578] mt-2">
+            Quản lý các đơn vị vận chuyển · Theo dõi công nợ phí vận chuyển với từng bên
+          </p>
+        </div>
+        {canCreate && (
+          <button onClick={() => setModal({ type: "new_carrier" })}
+            className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium"
+            style={{ backgroundColor: "#c4a962", color: "#1a2332", boxShadow: "0 2px 8px rgba(196,169,98,0.3)" }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "#b8a056"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = "#c4a962"; }}>
+            <Plus size={14} /> Thêm đơn vị vận chuyển
+          </button>
+        )}
+      </div>
+
+      {/* KPI */}
+      <div className="grid grid-cols-3 gap-4 mb-6">
+        <div className="bg-white border border-[#e5dfd1] p-5 border-l-4" style={{ borderLeftColor: totalUnpaid > 0 ? "#d97757" : "#8a96a8" }}>
+          <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Tổng công nợ vận chuyển</div>
+          <div className="text-2xl mono font-medium mt-2" style={{ color: totalUnpaid > 0 ? "#d97757" : "#1a2332" }}>
+            {formatCNY(totalUnpaid)}
+          </div>
+          <div className="text-xs text-[#5a6578] mt-1">≈ {formatVND(totalUnpaid * CNY_VND_RATE)}</div>
+        </div>
+        <div className="bg-white border border-[#e5dfd1] p-5 border-l-4 border-l-[#4a7c59]">
+          <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Đã thanh toán</div>
+          <div className="text-2xl mono font-medium mt-2 text-[#4a7c59]">{formatCNY(totalPaid)}</div>
+          <div className="text-xs text-[#5a6578] mt-1">Tổng chi phí đã trả cho vận chuyển</div>
+        </div>
+        <div className="bg-white border border-[#e5dfd1] p-5 border-l-4 border-l-[#c4a962]">
+          <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Đơn vị đang hoạt động</div>
+          <div className="text-2xl mono font-medium mt-2">{activeCarriers}</div>
+          <div className="text-xs text-[#5a6578] mt-1">Tổng {carriers.length} đơn vị đã đăng ký</div>
+        </div>
+      </div>
+
+      {/* Danh sách carrier */}
+      <div className="bg-white border border-[#e5dfd1]">
+        <div className="px-6 py-4 border-b border-[#e5dfd1] bg-[#faf8f2]">
+          <div className="text-sm uppercase tracking-wider text-[#8a7c4f]">Danh sách đơn vị vận chuyển</div>
+        </div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-[#faf8f2] text-xs uppercase tracking-wider text-[#8a7c4f]">
+              <th className="text-left px-4 py-2.5">Tên đơn vị</th>
+              <th className="text-left px-4 py-2.5">Mã</th>
+              <th className="text-left px-4 py-2.5">Liên hệ</th>
+              <th className="text-left px-4 py-2.5">Điều khoản</th>
+              <th className="text-right px-4 py-2.5">Lô hàng</th>
+              <th className="text-right px-4 py-2.5">Đã trả</th>
+              <th className="text-right px-4 py-2.5">Đang nợ</th>
+              <th className="text-left px-4 py-2.5">Trạng thái</th>
+              <th className="px-4 py-2.5"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {carriers.map(c => {
+              const stats = carrierStats[c.id] || { unpaid: 0, paid: 0, shipmentCount: 0, deliveryCount: 0 };
+              return (
+                <tr key={c.id} className="border-t border-[#e5dfd1] hover:bg-[#faf8f2] cursor-pointer" onClick={() => setSelected(c)}>
+                  <td className="px-4 py-3">
+                    <div className="flex items-center gap-2">
+                      <Truck size={14} className="text-[#5a6578]" />
+                      <div>
+                        <div className="font-medium text-[#1a2332]">{c.name}</div>
+                        {c.name_cn && <div className="text-xs text-[#5a6578]">{c.name_cn}</div>}
+                      </div>
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 mono text-xs">{c.code}</td>
+                  <td className="px-4 py-3 text-xs">
+                    <div>{c.contact_name || "—"}</div>
+                    <div className="text-[#5a6578] mono text-[10px]">{c.phone || "—"}</div>
+                  </td>
+                  <td className="px-4 py-3 text-xs">{c.payment_terms || "—"}</td>
+                  <td className="px-4 py-3 text-right text-xs mono">
+                    {stats.shipmentCount}
+                    {stats.deliveryCount > stats.shipmentCount && (
+                      <div className="text-[10px] text-[#5a6578]">({stats.deliveryCount} delivery)</div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right mono text-xs text-[#4a7c59]">{formatCNY(stats.paid)}</td>
+                  <td className="px-4 py-3 text-right mono text-xs" style={{ color: stats.unpaid > 0 ? "#d97757" : "#8a96a8" }}>
+                    {formatCNY(stats.unpaid)}
+                  </td>
+                  <td className="px-4 py-3">
+                    {c.status === "active" ? (
+                      <span className="text-[10px] px-2 py-0.5 bg-[#e0ede4] text-[#4a7c59] font-medium">Hoạt động</span>
+                    ) : (
+                      <span className="text-[10px] px-2 py-0.5 bg-[#f5f2eb] text-[#8a96a8] font-medium">Ngưng</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                    {canCreate && (
+                      <div className="flex items-center gap-1">
+                        <button onClick={() => setModal({ type: "edit_carrier", carrier: c })}
+                          className="p-1.5 text-[#4a7bb8] hover:bg-[#dbe8f5]" title="Sửa">
+                          <Edit2 size={12} />
+                        </button>
+                        <button onClick={() => onToggleStatus(c.id)}
+                          className="p-1.5 text-[#8a96a8] hover:bg-[#f5f2eb]" title={c.status === "active" ? "Vô hiệu hóa" : "Kích hoạt"}>
+                          <Ban size={12} />
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+            {carriers.length === 0 && (
+              <tr>
+                <td colSpan={9} className="px-4 py-8 text-center text-sm text-[#8a96a8] italic">
+                  Chưa có đơn vị vận chuyển nào. Bấm "Thêm đơn vị vận chuyển" để tạo mới.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {selected && (
+        <CarrierDetailPanel
+          carrier={selected}
+          shipments={shipments}
+          deliveries={deliveries}
+          pos={pos}
+          canEdit={canEdit}
+          onClose={() => setSelected(null)}
+          onToggleShippingPaid={onToggleShippingPaid}
+          onToggleDocs={onToggleDocs}
+        />
+      )}
+    </div>
+  );
+}
+
+function CarrierDetailPanel({ carrier, shipments, deliveries, pos, canEdit, onClose, onToggleShippingPaid, onToggleDocs }) {
+  // Lọc shipment của carrier này
+  const carrierShipments = useMemo(() => {
+    return shipments.filter(s => s.carrier_id === carrier.id);
+  }, [shipments, carrier.id]);
+
+  // Stats
+  const stats = useMemo(() => {
+    const unpaid = carrierShipments.filter(s => !s.shipping_fee_paid && s.shipping_fee_cny > 0);
+    const paid = carrierShipments.filter(s => s.shipping_fee_paid);
+    const missingDocs = carrierShipments.filter(s => !s.docs_completed && deliveries.some(d => d.tracking === s.tracking && d.status === "arrived"));
+    return {
+      totalUnpaid: unpaid.reduce((sum, s) => sum + s.shipping_fee_cny, 0),
+      totalPaid: paid.reduce((sum, s) => sum + s.shipping_fee_cny, 0),
+      unpaidCount: unpaid.length,
+      paidCount: paid.length,
+      missingDocsCount: missingDocs.length,
+      totalShipments: carrierShipments.length,
+    };
+  }, [carrierShipments, deliveries]);
+
+  // Với mỗi shipment, tính ra info về các delivery gắn vào nó
+  const shipmentDetails = useMemo(() => {
+    return carrierShipments.map(sh => {
+      const groupDels = deliveries.filter(d => d.tracking === sh.tracking);
+      // Tổng giá trị hàng
+      const totalValue = groupDels.reduce((sum, d) =>
+        sum + d.lines.reduce((s, l) => s + l.qty * l.unit_price, 0), 0);
+      // Ngày ship sớm nhất
+      const shippedDate = groupDels.length > 0
+        ? groupDels.map(d => d.shipped_date).sort()[0]
+        : null;
+      // Các nước đích
+      const destinations = [...new Set(groupDels.map(d => {
+        const w = getWarehouse(d.destination_id);
+        return w ? `${w.flag} ${w.code}` : d.destination_id;
+      }))];
+      // Trạng thái tổng hợp
+      const allArrived = groupDels.length > 0 && groupDels.every(d => d.status === "arrived");
+      const anyInTransit = groupDels.some(d => d.status === "in_transit");
+      return {
+        shipment: sh,
+        groupDels,
+        totalValue,
+        shippedDate,
+        destinations,
+        allArrived,
+        anyInTransit,
+      };
+    }).sort((a, b) => {
+      // Chưa trả phí / chưa đủ chứng từ lên trước
+      const aPriority = (!a.shipment.shipping_fee_paid && a.shipment.shipping_fee_cny > 0) || (!a.shipment.docs_completed && a.allArrived);
+      const bPriority = (!b.shipment.shipping_fee_paid && b.shipment.shipping_fee_cny > 0) || (!b.shipment.docs_completed && b.allArrived);
+      if (aPriority !== bPriority) return aPriority ? -1 : 1;
+      return (b.shippedDate || "").localeCompare(a.shippedDate || "");
+    });
+  }, [carrierShipments, deliveries]);
+
+  return (
+    <div className="fixed inset-0 bg-[#1e4d7b]/98 backdrop-blur-md flex justify-end z-50" onClick={onClose}>
+      <div className="w-[820px] bg-[#f5f2eb] h-full overflow-y-auto animate-in" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="p-6 border-b border-[#e5dfd1] bg-white flex justify-between items-start">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Carrier · {carrier.code}</div>
+            <div className="flex items-center gap-3 mt-1">
+              <Truck size={24} className="text-[#1a2332]" />
+              <div>
+                <div className="text-2xl font-medium text-[#1a2332]">{carrier.name}</div>
+                {carrier.name_cn && <div className="text-sm text-[#5a6578]">{carrier.name_cn}</div>}
+              </div>
+            </div>
+          </div>
+          <button onClick={onClose}><X size={20} /></button>
+        </div>
+
+        {/* Contact + Terms */}
+        <div className="px-6 py-4 bg-white border-b border-[#e5dfd1]">
+          <div className="grid grid-cols-3 gap-4 text-xs">
+            <div>
+              <div className="uppercase tracking-wider text-[#8a7c4f]">Người liên hệ</div>
+              <div className="mt-1 text-sm text-[#1a2332]">{carrier.contact_name || "—"}</div>
+              <div className="mono text-[10px] text-[#5a6578]">{carrier.phone || "—"}</div>
+              {carrier.email && <div className="text-[11px] text-[#4a7bb8]">{carrier.email}</div>}
+            </div>
+            <div>
+              <div className="uppercase tracking-wider text-[#8a7c4f]">Điều khoản thanh toán</div>
+              <div className="mt-1 text-sm text-[#1a2332] font-medium">{carrier.payment_terms || "—"}</div>
+            </div>
+            <div>
+              <div className="uppercase tracking-wider text-[#8a7c4f]">Trạng thái</div>
+              <div className="mt-1">
+                {carrier.status === "active" ? (
+                  <span className="text-[10px] px-2 py-0.5 bg-[#e0ede4] text-[#4a7c59] font-medium">Đang hoạt động</span>
+                ) : (
+                  <span className="text-[10px] px-2 py-0.5 bg-[#f5f2eb] text-[#8a96a8] font-medium">Ngưng hoạt động</span>
+                )}
+              </div>
+            </div>
+          </div>
+          {carrier.notes && (
+            <div className="mt-3 pt-3 border-t border-[#e5dfd1]">
+              <div className="text-[10px] uppercase tracking-wider text-[#8a7c4f]">Ghi chú</div>
+              <div className="text-xs text-[#5a6578] italic mt-1">{carrier.notes}</div>
+            </div>
+          )}
+        </div>
+
+        {/* KPI Debt */}
+        <div className="p-6 bg-[#faf8f2] border-b border-[#e5dfd1]">
+          <div className="text-xs uppercase tracking-wider text-[#8a7c4f] mb-3">Tình hình công nợ</div>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-white p-4 border-l-4" style={{ borderLeftColor: stats.totalUnpaid > 0 ? "#d97757" : "#8a96a8" }}>
+              <div className="text-[10px] uppercase tracking-wider text-[#8a7c4f]">Đang nợ</div>
+              <div className="text-xl mono font-medium mt-1" style={{ color: stats.totalUnpaid > 0 ? "#d97757" : "#1a2332" }}>
+                {formatCNY(stats.totalUnpaid)}
+              </div>
+              <div className="text-[10px] text-[#5a6578] mt-1">{stats.unpaidCount} lô · ≈ {formatVND(stats.totalUnpaid * CNY_VND_RATE)}</div>
+            </div>
+            <div className="bg-white p-4 border-l-4 border-l-[#4a7c59]">
+              <div className="text-[10px] uppercase tracking-wider text-[#8a7c4f]">Đã trả</div>
+              <div className="text-xl mono font-medium mt-1 text-[#4a7c59]">{formatCNY(stats.totalPaid)}</div>
+              <div className="text-[10px] text-[#5a6578] mt-1">{stats.paidCount} lô đã thanh toán</div>
+            </div>
+            <div className="bg-white p-4 border-l-4" style={{ borderLeftColor: stats.missingDocsCount > 0 ? "#c4a962" : "#4a7c59" }}>
+              <div className="text-[10px] uppercase tracking-wider text-[#8a7c4f]">Thiếu chứng từ</div>
+              <div className="text-xl mono font-medium mt-1" style={{ color: stats.missingDocsCount > 0 ? "#c4a962" : "#4a7c59" }}>
+                {stats.missingDocsCount}
+              </div>
+              <div className="text-[10px] text-[#5a6578] mt-1">lô đã về nhưng chưa đủ</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Shipments list */}
+        <div className="p-6">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <div className="text-sm uppercase tracking-wider text-[#8a7c4f]">Danh sách lô hàng qua {carrier.code}</div>
+              <div className="text-[11px] text-[#8a96a8] italic mt-0.5">Ưu tiên hiển thị lô đang nợ / thiếu chứng từ lên đầu</div>
+            </div>
+            <div className="text-sm mono text-[#5a6578]">{shipmentDetails.length} lô</div>
+          </div>
+
+          {shipmentDetails.length === 0 ? (
+            <div className="bg-white border border-[#e5dfd1] p-8 text-center text-sm text-[#8a96a8] italic">
+              Chưa có lô hàng nào được gán cho đơn vị vận chuyển này.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {shipmentDetails.map(({ shipment, groupDels, totalValue, shippedDate, destinations, allArrived, anyInTransit }) => {
+                const isUnpaid = !shipment.shipping_fee_paid && shipment.shipping_fee_cny > 0;
+                const missingDocs = !shipment.docs_completed && allArrived;
+                const hasIssue = isUnpaid || missingDocs;
+                const borderColor = isUnpaid ? "#d97757" : (missingDocs ? "#c4a962" : "#e5dfd1");
+
+                return (
+                  <div key={shipment.tracking} className="bg-white border" style={{ borderColor: hasIssue ? borderColor : "#e5dfd1", borderLeftWidth: hasIssue ? 4 : 1 }}>
+                    <div className="p-4">
+                      <div className="flex items-start justify-between gap-4 mb-3">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <div className="text-sm font-medium text-[#1a2332] mono">{shipment.tracking}</div>
+                            {groupDels.length > 1 && (
+                              <span className="text-[10px] px-1.5 py-0.5 font-medium whitespace-nowrap" style={{ backgroundColor: "#dbe8f5", color: "#185fa5" }}>
+                                🔗 Gộp {groupDels.length} delivery
+                              </span>
+                            )}
+                            {anyInTransit && (
+                              <span className="text-[10px] px-1.5 py-0.5 font-medium whitespace-nowrap bg-[#fef4e4] text-[#c4a962]">
+                                Đang vận chuyển
+                              </span>
+                            )}
+                            {allArrived && (
+                              <span className="text-[10px] px-1.5 py-0.5 font-medium whitespace-nowrap bg-[#e0ede4] text-[#4a7c59]">
+                                Đã về kho
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-3 mt-2 text-xs text-[#5a6578]">
+                            <span className="mono">{shippedDate || "—"}</span>
+                            <span>·</span>
+                            <span>{destinations.join(", ")}</span>
+                            <span>·</span>
+                            <span>{groupDels.map(d => d.id).join(", ")}</span>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-[10px] uppercase tracking-wider text-[#8a7c4f]">Giá trị hàng</div>
+                          <div className="text-sm mono font-medium text-[#1a2332]">{formatCNY(totalValue)}</div>
+                        </div>
+                      </div>
+
+                      {/* Status row: chứng từ + phí VC */}
+                      <div className="grid grid-cols-2 gap-3 pt-3 border-t border-[#e5dfd1]">
+                        {/* Chứng từ */}
+                        <button
+                          onClick={() => canEdit && onToggleDocs(shipment.tracking)}
+                          disabled={!canEdit}
+                          className="flex items-center gap-2 p-2 border text-left disabled:cursor-not-allowed"
+                          style={shipment.docs_completed
+                            ? { backgroundColor: "#e0ede4", borderColor: "#4a7c59" }
+                            : { backgroundColor: "#faf8f2", borderColor: "#e5dfd1" }}
+                        >
+                          <div className="flex items-center justify-center w-5 h-5 border-2 flex-shrink-0"
+                            style={shipment.docs_completed
+                              ? { backgroundColor: "#4a7c59", borderColor: "#4a7c59" }
+                              : { backgroundColor: "#ffffff", borderColor: "#8a96a8" }}>
+                            {shipment.docs_completed && <CheckCircle2 size={10} color="#ffffff" strokeWidth={3} />}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[10px] uppercase tracking-wider text-[#8a7c4f]">Chứng từ</div>
+                            <div className="text-xs font-medium text-[#1a2332]">
+                              {shipment.docs_completed ? "✓ Đã đủ" : "Chưa đủ"}
+                            </div>
+                          </div>
+                        </button>
+
+                        {/* Phí VC */}
+                        {shipment.shipping_fee_cny > 0 ? (
+                          <button
+                            onClick={() => canEdit && onToggleShippingPaid(shipment.tracking)}
+                            disabled={!canEdit}
+                            className="flex items-center gap-2 p-2 border text-left disabled:cursor-not-allowed"
+                            style={shipment.shipping_fee_paid
+                              ? { backgroundColor: "#e0ede4", borderColor: "#4a7c59" }
+                              : { backgroundColor: "#fae5dd", borderColor: "#d97757" }}
+                          >
+                            <div className="flex items-center justify-center w-5 h-5 border-2 flex-shrink-0"
+                              style={shipment.shipping_fee_paid
+                                ? { backgroundColor: "#4a7c59", borderColor: "#4a7c59" }
+                                : { backgroundColor: "#ffffff", borderColor: "#d97757" }}>
+                              {shipment.shipping_fee_paid && <CheckCircle2 size={10} color="#ffffff" strokeWidth={3} />}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[10px] uppercase tracking-wider text-[#8a7c4f]">Phí vận chuyển</div>
+                              <div className="text-xs font-medium text-[#1a2332] mono">
+                                {formatCNY(shipment.shipping_fee_cny)}
+                                {shipment.shipping_fee_paid ? " · ✓ Đã trả" : " · Chưa trả"}
+                              </div>
+                            </div>
+                          </button>
+                        ) : (
+                          <div className="flex items-center gap-2 p-2 border border-[#e5dfd1] bg-[#faf8f2]">
+                            <div className="flex-1">
+                              <div className="text-[10px] uppercase tracking-wider text-[#8a7c4f]">Phí vận chuyển</div>
+                              <div className="text-xs text-[#8a96a8] italic">Chưa có phí</div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Ngày thanh toán + notes */}
+                      {(shipment.paid_date || shipment.notes) && (
+                        <div className="mt-3 pt-3 border-t border-[#e5dfd1] text-[11px] text-[#5a6578]">
+                          {shipment.paid_date && (
+                            <div className="flex items-center gap-2">
+                              <CheckCircle2 size={10} className="text-[#4a7c59]" />
+                              <span>Đã trả ngày {shipment.paid_date}</span>
+                            </div>
+                          )}
+                          {shipment.notes && (
+                            <div className="italic mt-1">📝 {shipment.notes}</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CarrierFormModal({ carrier, onSubmit, onClose }) {
+  const isEdit = !!carrier;
+  const [formData, setFormData] = useState({
+    name: carrier?.name || "",
+    name_cn: carrier?.name_cn || "",
+    code: carrier?.code || "",
+    contact_name: carrier?.contact_name || "",
+    email: carrier?.email || "",
+    phone: carrier?.phone || "",
+    payment_terms: carrier?.payment_terms || "Net 30",
+    notes: carrier?.notes || "",
+  });
+
+  const handleSubmit = () => {
+    if (!formData.name.trim()) {
+      alert("Vui lòng nhập tên đơn vị vận chuyển");
+      return;
+    }
+    if (!formData.code.trim()) {
+      alert("Vui lòng nhập mã (viết tắt)");
+      return;
+    }
+    onSubmit(formData);
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 bg-[#1a2332]/95 backdrop-blur-md flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-white w-full max-w-2xl max-h-[90vh] overflow-y-auto animate-in" onClick={e => e.stopPropagation()}>
+        <div className="p-6 border-b border-[#e5dfd1] flex justify-between items-center">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-[#8a7c4f]">Logistics</div>
+            <div className="text-2xl font-medium mt-1">
+              {isEdit ? "Sửa đơn vị vận chuyển" : "Thêm đơn vị vận chuyển"}
+            </div>
+          </div>
+          <button onClick={onClose}><X size={20} /></button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs uppercase tracking-wider text-[#8a7c4f] mb-1 block">Tên đơn vị *</label>
+              <input type="text" value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })}
+                placeholder="VD: SF Express"
+                className="w-full px-3 py-2 bg-white border border-[#e5dfd1] focus:border-[#c4a962] outline-none text-sm" />
+            </div>
+            <div>
+              <label className="text-xs uppercase tracking-wider text-[#8a7c4f] mb-1 block">Tên tiếng Trung</label>
+              <input type="text" value={formData.name_cn} onChange={e => setFormData({ ...formData, name_cn: e.target.value })}
+                placeholder="VD: 顺丰速运"
+                className="w-full px-3 py-2 bg-white border border-[#e5dfd1] focus:border-[#c4a962] outline-none text-sm" />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="text-xs uppercase tracking-wider text-[#8a7c4f] mb-1 block">Mã viết tắt *</label>
+              <input type="text" value={formData.code} onChange={e => setFormData({ ...formData, code: e.target.value.toUpperCase() })}
+                placeholder="VD: SFC, KRY, DHL"
+                className="w-full px-3 py-2 bg-white border border-[#e5dfd1] focus:border-[#c4a962] outline-none text-sm mono" />
+            </div>
+            <div>
+              <label className="text-xs uppercase tracking-wider text-[#8a7c4f] mb-1 block">Điều khoản thanh toán</label>
+              <select value={formData.payment_terms} onChange={e => setFormData({ ...formData, payment_terms: e.target.value })}
+                className="w-full px-3 py-2 bg-white border border-[#e5dfd1] focus:border-[#c4a962] outline-none text-sm">
+                <option value="Trả ngay">Trả ngay</option>
+                <option value="Net 15">Net 15 · 15 ngày</option>
+                <option value="Net 30">Net 30 · 30 ngày</option>
+                <option value="Net 45">Net 45 · 45 ngày</option>
+                <option value="Net 60">Net 60 · 60 ngày</option>
+                <option value="Cuối tháng">Cuối tháng</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="bg-[#faf8f2] p-4 border border-[#e5dfd1]">
+            <div className="text-xs uppercase tracking-wider text-[#8a7c4f] mb-3">Thông tin liên hệ</div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs text-[#5a6578] mb-1 block">Người liên hệ</label>
+                <input type="text" value={formData.contact_name} onChange={e => setFormData({ ...formData, contact_name: e.target.value })}
+                  placeholder="VD: Mr. Zhang"
+                  className="w-full px-3 py-2 bg-white border border-[#e5dfd1] focus:border-[#c4a962] outline-none text-sm" />
+              </div>
+              <div>
+                <label className="text-xs text-[#5a6578] mb-1 block">Số điện thoại</label>
+                <input type="text" value={formData.phone} onChange={e => setFormData({ ...formData, phone: e.target.value })}
+                  placeholder="+86 ..."
+                  className="w-full px-3 py-2 bg-white border border-[#e5dfd1] focus:border-[#c4a962] outline-none text-sm mono" />
+              </div>
+              <div className="col-span-2">
+                <label className="text-xs text-[#5a6578] mb-1 block">Email</label>
+                <input type="email" value={formData.email} onChange={e => setFormData({ ...formData, email: e.target.value })}
+                  placeholder="contact@example.com"
+                  className="w-full px-3 py-2 bg-white border border-[#e5dfd1] focus:border-[#c4a962] outline-none text-sm" />
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="text-xs uppercase tracking-wider text-[#8a7c4f] mb-1 block">Ghi chú</label>
+            <textarea value={formData.notes} onChange={e => setFormData({ ...formData, notes: e.target.value })}
+              rows={2} placeholder="Thông tin bổ sung, ưu điểm, lưu ý..."
+              className="w-full px-3 py-2 bg-white border border-[#e5dfd1] focus:border-[#c4a962] outline-none text-sm resize-none" />
+          </div>
+        </div>
+
+        <div className="p-6 border-t border-[#e5dfd1] flex justify-end gap-3 bg-[#faf8f2]">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-[#5a6578]">Hủy</button>
+          <button onClick={handleSubmit}
+            className="px-6 py-2 text-sm font-medium"
+            style={{ backgroundColor: "#c4a962", color: "#1a2332" }}>
+            {isEdit ? "Cập nhật" : "Thêm mới"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ReportsView({ suppliers, pos, payments, deliveries, currentUser }) {
   // Kỳ mặc định: tháng trước (1/N-1 đến cuối tháng N-1)
   const defaultRange = useMemo(() => {
@@ -3672,7 +4765,7 @@ function ReportsView({ suppliers, pos, payments, deliveries, currentUser }) {
           <div className="text-xs uppercase tracking-[0.2em] text-[#8a7c4f]">Reports · 月度对账报表</div>
           <h1 className="text-4xl font-light mt-2">Báo cáo đối soát công nợ</h1>
           <p className="text-sm text-[#5a6578] mt-2">
-            Xuất file Excel song ngữ EN + 中文 để gửi NCC đối soát cuối tháng · Mỗi NCC 1 file riêng
+            Xuất file Excel song ngữ Việt + 中文 để gửi NCC đối soát cuối tháng · Mỗi NCC 1 file riêng
           </p>
         </div>
       </div>
@@ -4394,9 +5487,9 @@ function PaymentsView({ pos, payments, supplierDebts, suppliers, totalCommitted,
   );
 }
 
-function Modal({ type, pos, deliveries, payments, supplierDebts, skus, suppliers, users, currentUser, editingSKU, editingSupplier, user, onClose, onCreateDelivery, onCreatePayment, onCreatePO, onCreateSKU, onUpdateSKU, onCreateSupplier, onUpdateSupplier, onCreateUser, onUpdateUser }) {
+function Modal({ type, pos, deliveries, payments, supplierDebts, skus, suppliers, users, carriers, carrier, currentUser, editingSKU, editingSupplier, user, onClose, onCreateDelivery, onCreatePayment, onCreatePO, onCreateSKU, onUpdateSKU, onCreateSupplier, onUpdateSupplier, onCreateUser, onUpdateUser, onCreateCarrier, onUpdateCarrier }) {
   if (type === "new_delivery") {
-    return <NewDeliveryModal pos={pos} deliveries={deliveries} onClose={onClose} onCreate={onCreateDelivery} />;
+    return <NewDeliveryModal pos={pos} deliveries={deliveries} carriers={carriers} onClose={onClose} onCreate={onCreateDelivery} />;
   }
   if (type === "new_payment") {
     return <NewPaymentModal pos={pos} payments={payments} supplierDebts={supplierDebts} suppliers={suppliers} onClose={onClose} onCreate={onCreatePayment} />;
@@ -4416,6 +5509,12 @@ function Modal({ type, pos, deliveries, payments, supplierDebts, skus, suppliers
   if (type === "edit_user") {
     return <UserFormModal mode="edit" user={user} onClose={onClose} onCreate={onCreateUser} onUpdate={onUpdateUser} />;
   }
+  if (type === "new_carrier") {
+    return <CarrierFormModal onSubmit={onCreateCarrier} onClose={onClose} />;
+  }
+  if (type === "edit_carrier") {
+    return <CarrierFormModal carrier={carrier} onSubmit={(data) => onUpdateCarrier(carrier.id, data)} onClose={onClose} />;
+  }
   return (
     <div className="fixed inset-0 bg-[#1e4d7b]/98 backdrop-blur-md flex items-center justify-center z-50 p-6" onClick={onClose}>
       <div className="bg-[#7fa8d1] w-[600px] max-w-full animate-in" onClick={e => e.stopPropagation()}>
@@ -4434,17 +5533,28 @@ function Modal({ type, pos, deliveries, payments, supplierDebts, skus, suppliers
   );
 }
 
-function NewDeliveryModal({ pos, deliveries, onClose, onCreate }) {
+function NewDeliveryModal({ pos, deliveries, carriers, onClose, onCreate }) {
   const [step, setStep] = useState(1);
   const [destinationId, setDestinationId] = useState(null);
   const [shippedDate, setShippedDate] = useState("2026-04-20");
   const [tracking, setTracking] = useState("");
+  const [carrierId, setCarrierId] = useState("");
   // selectedLines: { [po_line_id]: qty }
   const [selectedLines, setSelectedLines] = useState({});
 
   // Step 1: chọn nước đích
   const destinations = SEED_WAREHOUSES.filter(w => w.type === "destination");
   const destination = destinations.find(d => d.id === destinationId);
+
+  // Khi nhập tracking trùng với 1 tracking đã có → auto-suggest carrier
+  useEffect(() => {
+    if (!tracking) return;
+    const existing = deliveries.find(d => d.tracking === tracking);
+    if (existing) {
+      // Tracking đã dùng → tìm shipment của nó để lấy carrier (caller đã pass carriers)
+      // Ở đây ta chỉ hint; carrier_id nằm ở shipment bên ngoài — bỏ qua auto-fill
+    }
+  }, [tracking, deliveries]);
 
   // Tính số còn lại cho mỗi PO line
   const availableLines = useMemo(() => {
@@ -4523,6 +5633,7 @@ function NewDeliveryModal({ pos, deliveries, onClose, onCreate }) {
       arrived_date: null,
       tracking: newTracking,
       status: "in_transit",
+      carrier_id: carrierId || null,  // handler sẽ tách ra và lưu vào shipment
       lines: selectedLineObjects.map(l => ({
         po_line_id: l.line_id,
         sku_id: l.sku_id,
@@ -4614,7 +5725,39 @@ function NewDeliveryModal({ pos, deliveries, onClose, onCreate }) {
                   <label className="text-xs uppercase tracking-wider text-[#8a7c4f] mb-2 block">Tracking number (tùy chọn)</label>
                   <input type="text" value={tracking} onChange={e => setTracking(e.target.value)} placeholder="Tự động sinh nếu để trống"
                     className="w-full px-4 py-3 bg-white border border-[#e5dfd1] focus:border-[#c4a962] outline-none text-sm mono" />
+                  {tracking && deliveries.some(d => d.tracking === tracking) && (
+                    <div className="text-[10px] text-[#4a7bb8] mt-1 italic">
+                      🔗 Tracking này đã có delivery khác dùng → sẽ gộp chung chứng từ & phí VC
+                    </div>
+                  )}
                 </div>
+              </div>
+
+              {/* Đơn vị vận chuyển */}
+              <div className="mt-4">
+                <label className="text-xs uppercase tracking-wider text-[#8a7c4f] mb-2 block">
+                  Đơn vị vận chuyển
+                  <span className="normal-case text-[10px] text-[#5a6578] italic ml-2">(có thể bổ sung sau)</span>
+                </label>
+                <select value={carrierId} onChange={e => setCarrierId(e.target.value)}
+                  className="w-full px-4 py-3 bg-white border border-[#e5dfd1] focus:border-[#c4a962] outline-none text-sm">
+                  <option value="">— Chưa chọn —</option>
+                  {(carriers || []).filter(c => c.status === "active").map(c => (
+                    <option key={c.id} value={c.id}>
+                      🚚 {c.name}{c.name_cn ? ` · ${c.name_cn}` : ""} ({c.code}) · {c.payment_terms || "—"}
+                    </option>
+                  ))}
+                </select>
+                {carrierId && (() => {
+                  const c = (carriers || []).find(x => x.id === carrierId);
+                  if (!c) return null;
+                  return (
+                    <div className="mt-2 px-3 py-2 bg-[#faf8f2] border-l-2 border-[#c4a962] text-xs text-[#5a6578]">
+                      Liên hệ: {c.contact_name || "—"} · {c.phone || "—"}
+                      {c.notes && <div className="italic mt-1">{c.notes}</div>}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           )}
