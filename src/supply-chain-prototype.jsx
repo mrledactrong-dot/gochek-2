@@ -7642,3 +7642,4 @@ function SupplierFormModal({ suppliers, editing, onClose, onCreate, onUpdate }) 
     </div>
   );
 }
+
